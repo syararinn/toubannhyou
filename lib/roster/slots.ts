@@ -15,13 +15,20 @@ export type DutySlotKind =
   | "予備"
   | "国会週番"
   | "国会月番"
+  /** 月番・週番の欠員時に無印メンバーへ割り当てる国会応援枠 */
+  | "国会（応援）"
   | "国会";
 
 function isCongressKind(kind: DutySlotKind): boolean {
-  return kind === "国会週番" || kind === "国会月番" || kind === "国会";
+  return (
+    kind === "国会週番" ||
+    kind === "国会月番" ||
+    kind === "国会（応援）" ||
+    kind === "国会"
+  );
 }
 
-/** 勤務間インターバル判定に使う「遅番側」相当の枠 */
+/** 勤務間インターバル・午後半休判定用の「遅番側」相当（夜✖️の可否とは別。夜✖️は eligibility で日付付き判定） */
 export function slotIsLateLike(kind: DutySlotKind): boolean {
   return kind === "遅番" || kind === "予備" || isCongressKind(kind);
 }
@@ -39,7 +46,7 @@ export interface DemandSlot {
   fixedAssignee?: DutyMember;
 }
 
-function lookupCongressMonthly(
+export function lookupCongressMonthly(
   admin: AdminSettings,
   iso: ISODateString,
 ): DutyMember | undefined {
@@ -47,7 +54,7 @@ function lookupCongressMonthly(
   return admin.congressMonthlyAssignments.find((a) => a.yearMonth === ym)?.dutyMember;
 }
 
-function lookupCongressWeekly(
+export function lookupCongressWeekly(
   admin: AdminSettings,
   iso: ISODateString,
 ): DutyMember | undefined {
@@ -117,6 +124,12 @@ export function buildDemandSlotsForDate(
     const lateN = ov?.weekdaySlots?.late ?? 1;
     const monthly = lookupCongressMonthly(admin, date);
     const inDiet = isInAnyDietSession(admin, date);
+    for (let i = 0; i < earlyN; i++) {
+      slots.push({ id: `early-${i}`, kind: "早番" });
+    }
+    for (let i = 0; i < lateN; i++) {
+      slots.push({ id: `late-${i}`, kind: "遅番" });
+    }
     if (inDiet) {
       const weekly = lookupCongressWeekly(admin, date);
       slots.push({
@@ -135,12 +148,6 @@ export function buildDemandSlotsForDate(
         kind: "国会月番",
         fixedAssignee: monthly,
       });
-    }
-    for (let i = 0; i < earlyN; i++) {
-      slots.push({ id: `early-${i}`, kind: "早番" });
-    }
-    for (let i = 0; i < lateN; i++) {
-      slots.push({ id: `late-${i}`, kind: "遅番" });
     }
     return slots;
   }

@@ -68,7 +68,10 @@ export function demoPreferencesByMember(): Partial<
 
   return {
     磯田: mk("磯田", [["2026-01-05", { fullDayOff: true }]]),
-    江田: mk("江田", [["2026-01-07", { morningHalfOff: true }]]),
+    江田: mk("江田", [
+      ["2026-01-07", { morningHalfOff: true }],
+      ["2026-01-14", { fullDayOff: true }],
+    ]),
     南: mk("南", [["2026-01-09", { afternoonHalfOff: true }]]),
     千葉: mk("千葉", [["2026-01-14", { nightUnavailable: true }]]),
     大久保: mk("大久保", [["2026-01-16", { fullyUnavailable: true }]]),

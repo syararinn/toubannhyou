@@ -13,30 +13,14 @@ import type {
   WeekdaySlotHeadcount,
 } from "@/types";
 import { ROSTER_COLUMN_ORDER } from "@/types";
+import {
+  loadAdminSettingsFromStorage,
+  saveAdminSettingsToStorage,
+} from "@/lib/adminSettingsStorage";
 
 const DUTY_MEMBERS = ROSTER_COLUMN_ORDER.filter(
   (name): name is DutyMember => name !== "牛田" && name !== "倉科",
 );
-
-function initialAdminSettings(): AdminSettings {
-  return {
-    dietSessions: [],
-    newspaperNonPublicationWorkDates: [],
-    graphExclusivePeriodsForIsobe: [],
-    secondmentByDutyMember: {
-      磯田: "active",
-      江田: "active",
-      鈴木: "active",
-      南: "active",
-      千葉: "active",
-      大久保: "active",
-      中嶋: "active",
-    },
-    dailyAttendanceOverrides: [],
-    congressMonthlyAssignments: [],
-    congressWeeklyAssignments: [],
-  };
-}
 
 function Section({
   title,
@@ -86,7 +70,11 @@ const btnDanger =
   "inline-flex items-center justify-center rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-700 transition hover:bg-red-50 dark:border-red-900/60 dark:bg-neutral-900 dark:text-red-400 dark:hover:bg-red-950/40";
 
 export default function AdminSettingsPage() {
-  const [settings, setSettings] = useState<AdminSettings>(initialAdminSettings);
+  const [settings, setSettings] = useState<AdminSettings>(loadAdminSettingsFromStorage);
+
+  useEffect(() => {
+    saveAdminSettingsToStorage(settings);
+  }, [settings]);
 
   const [congressYearMonth, setCongressYearMonth] = useState("2026-01");
   const [congressMonthlyMember, setCongressMonthlyMember] = useState<DutyMember | "">("");

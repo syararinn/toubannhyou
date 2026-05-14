@@ -96,6 +96,7 @@ export type YearMonthString = string;
 
 /**
  * 国会月当番: 指定部員がその月の全日の平日に「国会月番」として固定配置される。
+ * 同日に早番・遅番・メイン・予備は兼務しない。
  */
 export interface CongressMonthlyAssignment {
   yearMonth: YearMonthString;
@@ -105,6 +106,7 @@ export interface CongressMonthlyAssignment {
 /**
  * 国会週当番: 指定部員がその月内の「第N週」（月曜始まりの週ブロック）の平日に固定配置される。
  * 会期中は週当番と月当番の2名体制。月当番と同一人物には指定できない。
+ * 同日に早番・遅番・メイン・予備は兼務しない。
  */
 export interface CongressWeeklyAssignment {
   yearMonth: YearMonthString;
@@ -117,7 +119,7 @@ export interface AdminSettings {
   dietSessions: DietSessionPeriod[];
   /** 新聞休刊作業日（年間 10〜15 回程度想定） */
   newspaperNonPublicationWorkDates: ISODateString[];
-  /** グラフ専任期間（対象は磯田のみ。年 4 回など） */
+  /** グラフ専任期間（対象は磯田のみ。年 4 回など）。期間中は磯田を全当番枠から除外する。 */
   graphExclusivePeriodsForIsobe: LocalDateRange[];
   /** 各部員の出向中 / 在籍（出力列は出向中を常に空白） */
   secondmentByDutyMember: Record<DutyMember, SecondmentStatus>;
@@ -133,7 +135,15 @@ export interface AdminSettings {
 // 【3】部員希望入力（5 項目・上限ルール用の定数は別モジュールで参照してもよい）
 // ---------------------------------------------------------------------------
 
-/** 希望フラグ（休・✖️・午前半休・午後半休・夜✖️） */
+/**
+ * 希望フラグ（休・✖️・午前半休・午後半休・夜✖️）
+ *
+ * 当番生成におけるハード制約（抜粋・アルゴリズムと整合）:
+ * - 「休」「✖️」: その日のいかなる枠（早番・遅番・メイン・予備・国会月番・国会週番など）にも配置しない。
+ * - 「夜✖️」: 遅番と休日出勤（土日祝のメイン枠）のみハード不可。早番は可。休日の予備はハード可だが、日曜・祝日の予備は夜✖️の人を他に候補がいる限り避ける（生成ロジック）。
+ * - 国会月番・国会週番の指名者: その月／その週ブロックの平日は早番・遅番と兼務しない（国会枠または国会（応援）のみ）。
+ * - 磯田のグラフ専任期間中: 磯田は全日の当番枠から除外（早番・遅番・メイン・予備・国会含む）。
+ */
 export interface MemberDayPreferenceFlags {
   /** 休 */
   fullDayOff: boolean;
@@ -223,4 +233,11 @@ export interface GeneratedRosterDay {
   eventsAndNotes: string;
   /** E〜M 列。管理職列は手動テキスト、出向中の部員列は原則空白文字列 */
   rosterCellsByColumnPerson: Record<RosterColumnPerson, string>;
+  /**
+   * 日曜・国民の祝日・振替休日など（祭日マップに該当する日を含む）で、
+   * 表の行を休日色（ピンク）にする。土曜は false（土曜は別色）。
+   */
+  isRestDayPastelPinkRow: boolean;
+  /** E〜M 列に併記する、その日の部員希望（休・✖・午前半休・午後半休・夜× など） */
+  preferenceMarksByColumnPerson: Record<RosterColumnPerson, string>;
 }

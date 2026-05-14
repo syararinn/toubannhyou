@@ -1,13 +1,22 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
+  AdminSettings,
   DutyMember,
   ISODateString,
   MemberDayPreferenceFlags,
   MemberPreferenceInput,
 } from "@/types";
-import { DEFAULT_PREFERENCE_MONTHLY_CAPS, ROSTER_COLUMN_ORDER } from "@/types";
+import {
+  DEFAULT_PREFERENCE_MONTHLY_CAPS,
+  ROSTER_COLUMN_ORDER,
+} from "@/types";
+import {
+  ADMIN_SETTINGS_UPDATED_EVENT,
+  loadAdminSettingsFromStorage,
+} from "@/lib/adminSettingsStorage";
+import { getMemberCongressDutyLabels } from "@/lib/roster/congress-member-notice";
 
 const DUTY_MEMBERS = ROSTER_COLUMN_ORDER.filter(
   (name): name is DutyMember => name !== "牛田" && name !== "倉科",
@@ -117,6 +126,7 @@ const AI_RULES_PUBLIC_TEXT = [
   "勤務の前後に十分なインターバルが確保されるよう配慮します。",
   "当番の回数が極端に偏らないよう、全員が公平になるよう調整を試みます。",
   "ご入力いただいた希望は可能な範囲で尊重しますが、全体の制約を満たす必要があるため、すべてが通るとは限りません。",
+  "「休」「✖️」はその日の当番を希望しないものです。「夜✖️」は遅番と休日の出勤（土日祝のメイン枠）を希望しないものです。早番は可で、休日の予備は原則避けますが、どうしても人手が足りないときのみ割り当て得ます。",
   "国会会期・休刊作業日・グラフ専任・出向など、管理者が登録した条件は必ず守られます。",
   "最終的な割当はシステムが複数の条件を総合して決定します。",
 ] as const;
@@ -139,6 +149,21 @@ export default function MemberInputPage() {
 
   const [rulesOpen, setRulesOpen] = useState(false);
   const [viewMode, setViewMode] = useState<"list" | "calendar">("list");
+
+  const [adminSnapshot, setAdminSnapshot] = useState<AdminSettings>(() =>
+    loadAdminSettingsFromStorage(),
+  );
+
+  useEffect(() => {
+    const sync = () => setAdminSnapshot(loadAdminSettingsFromStorage());
+    sync();
+    window.addEventListener(ADMIN_SETTINGS_UPDATED_EVENT, sync);
+    window.addEventListener("focus", sync);
+    return () => {
+      window.removeEventListener(ADMIN_SETTINGS_UPDATED_EVENT, sync);
+      window.removeEventListener("focus", sync);
+    };
+  }, []);
 
   const caps = DEFAULT_PREFERENCE_MONTHLY_CAPS;
 
@@ -266,6 +291,11 @@ export default function MemberInputPage() {
               </h1>
               <p className="mt-1 text-sm text-neutral-600 dark:text-neutral-400">
                 ご自身の氏名を選び、対象月の各日に希望を入力してください（現在はブラウザ内のみに保存されるモックです）。
+                国会当番（月／週）は、同一ブラウザで{" "}
+                <a href="/admin" className="font-medium text-neutral-900 underline dark:text-neutral-100">
+                  管理者設定
+                </a>{" "}
+                に登録された内容があれば、平日の行に表示されます。
               </p>
             </div>
             <button type="button" className={btnSecondary} onClick={() => setRulesOpen(true)}>
@@ -311,7 +341,7 @@ export default function MemberInputPage() {
           <>
             <Section
               title={`希望入力（${monthTitle()}・${selectedMember}）`}
-              description="各日について「休」「✖️」「午前半休」「午後半休」「夜✖️」から該当するものにチェックを入れます。休・✖️は他の全日系・半休と同時には選べません。"
+              description="各日について「休」「✖️」「午前半休」「午後半休」「夜✖️」から該当するものにチェックを入れます。休・✖️は他の全日系・半休と同時には選べず、その日の当番（早番・遅番・メイン・予備・国会など）には原則入りません。夜✖️は遅番と休日の出勤（土日祝のメイン枠）には入りませんが、早番には入る場合があります。休日の予備は原則避けますが、他に配置できる人がいない場合のみ割り当て得ます。平日で国会当番に指定されている日は行の色と「注意」欄でお知らせします。"
             >
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
@@ -394,19 +424,31 @@ export default function MemberInputPage() {
                       const f = flagsByDate[date];
                       const congested = isHighCongestionRisk(date, f ?? emptyFlags());
                       const dots = summaryDots(f);
+                      const congressLabels =
+                        selectedMember !== null
+                          ? getMemberCongressDutyLabels(adminSnapshot, date, selectedMember)
+                          : [];
+                      const congressDay = congressLabels.length > 0;
                       return (
                         <div
                           key={date}
                           title={date}
                           className={`flex aspect-square flex-col items-center justify-center rounded-lg border text-xs transition ${
-                            congested
-                              ? "border-red-300 bg-red-50/80 dark:border-red-900/60 dark:bg-red-950/30"
-                              : "border-neutral-200 bg-neutral-50 dark:border-neutral-800 dark:bg-neutral-900/60"
+                            congressDay
+                              ? "border-amber-400 bg-amber-100/90 dark:border-amber-700 dark:bg-amber-950/50"
+                              : congested
+                                ? "border-red-300 bg-red-50/80 dark:border-red-900/60 dark:bg-red-950/30"
+                                : "border-neutral-200 bg-neutral-50 dark:border-neutral-800 dark:bg-neutral-900/60"
                           }`}
                         >
                           <span className="font-semibold tabular-nums text-neutral-900 dark:text-neutral-100">
                             {d}
                           </span>
+                          {congressDay ? (
+                            <span className="mt-0.5 max-w-full truncate px-0.5 text-[9px] font-medium text-amber-900 dark:text-amber-200">
+                              国会
+                            </span>
+                          ) : null}
                           {dots ? (
                             <span className="mt-0.5 max-w-full truncate px-0.5 text-[10px] text-neutral-600 dark:text-neutral-400">
                               {dots}
@@ -458,10 +500,20 @@ export default function MemberInputPage() {
                         const f = flagsByDate[date] ?? emptyFlags();
                         const wd = new Date(date + "T12:00:00").getDay();
                         const congested = isHighCongestionRisk(date, f);
+                        const congressLabels = getMemberCongressDutyLabels(
+                          adminSnapshot,
+                          date,
+                          selectedMember!,
+                        );
+                        const congressDay = congressLabels.length > 0;
                         return (
                           <tr
                             key={date}
-                            className="border-b border-neutral-100 odd:bg-white even:bg-neutral-50/80 dark:border-neutral-800/80 dark:odd:bg-neutral-950 dark:even:bg-neutral-900/40"
+                            className={`border-b border-neutral-100 odd:bg-white even:bg-neutral-50/80 dark:border-neutral-800/80 dark:odd:bg-neutral-950 dark:even:bg-neutral-900/40 ${
+                              congressDay
+                                ? "border-l-4 border-l-amber-500 bg-amber-50/70 dark:bg-amber-950/25"
+                                : ""
+                            }`}
                           >
                             <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-neutral-800 dark:text-neutral-200">
                               {date}
@@ -490,13 +542,24 @@ export default function MemberInputPage() {
                               </td>
                             ))}
                             <td className="px-3 py-2 text-xs">
-                              {congested ? (
-                                <span className="text-red-700 dark:text-red-400">
-                                  この日は休・✖️希望が集中しやすく、配置が成立しづらい可能性があります。
-                                </span>
-                              ) : (
-                                <span className="text-neutral-400">—</span>
-                              )}
+                              <div className="flex flex-col gap-1.5">
+                                {congressLabels.map((line) => (
+                                  <div
+                                    key={line}
+                                    className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-amber-950 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-100"
+                                  >
+                                    {line}
+                                  </div>
+                                ))}
+                                {congested ? (
+                                  <span className="text-red-700 dark:text-red-400">
+                                    この日は休・✖️希望が集中しやすく、配置が成立しづらい可能性があります。
+                                  </span>
+                                ) : null}
+                                {!congressLabels.length && !congested ? (
+                                  <span className="text-neutral-400">—</span>
+                                ) : null}
+                              </div>
                             </td>
                           </tr>
                         );

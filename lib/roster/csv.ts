@@ -19,9 +19,13 @@ export function rosterDaysToCsv(rows: GeneratedRosterDay[]): string {
   ];
   const lines: string[] = [header.map(csvEscapeCell).join(",")];
   for (const row of rows) {
-    const cells = ROSTER_COLUMN_ORDER.map(
-      (name) => row.rosterCellsByColumnPerson[name] ?? "",
-    );
+    const cells = ROSTER_COLUMN_ORDER.map((name) => {
+      const duty = row.rosterCellsByColumnPerson[name] ?? "";
+      const marks = row.preferenceMarksByColumnPerson?.[name]?.trim() ?? "";
+      if (!marks) return duty;
+      if (!duty) return marks;
+      return `${duty}（${marks}）`;
+    });
     lines.push(
       [
         row.date,
