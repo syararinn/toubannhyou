@@ -5,7 +5,7 @@ import type {
   ISODateString,
 } from "@/types";
 import { mondayBasedWeekIndexInMonth, yearMonthFromIso } from "./congress-week";
-import { isSaturday, isSunday, isWeekdayMonFri } from "./dates";
+import { eachDateInclusive, isSaturday, isSunday, isWeekdayMonFri, parseISODate } from "./dates";
 import { holidayNameOn } from "./holidays";
 
 export type DutySlotKind =
@@ -76,6 +76,29 @@ export function isInAnyDietSession(admin: AdminSettings, date: ISODateString): b
   return admin.dietSessions.some((p) => date >= p.start && date <= p.end);
 }
 
+/**
+ * その日と同じ「月内週ブロック」の平日のうち、いずれかが国会会期に含まれるか。
+ * 会期が週の途中から始まる場合でも、その週の月曜（会期前）から週番枠を出すために使う。
+ */
+export function weekBlockIntersectsDietSession(
+  admin: AdminSettings,
+  iso: ISODateString,
+): boolean {
+  if (!isWeekdayMonFri(iso)) return false;
+  const { y, m } = parseISODate(iso);
+  const pad = (n: number) => (n < 10 ? `0${n}` : String(n));
+  const lastD = new Date(y, m, 0).getDate();
+  const monthStart = `${y}-${pad(m)}-01`;
+  const monthEnd = `${y}-${pad(m)}-${pad(lastD)}`;
+  const wk = mondayBasedWeekIndexInMonth(iso);
+  for (const d of eachDateInclusive(monthStart, monthEnd)) {
+    if (!isWeekdayMonFri(d)) continue;
+    if (mondayBasedWeekIndexInMonth(d) !== wk) continue;
+    if (isInAnyDietSession(admin, d)) return true;
+  }
+  return false;
+}
+
 export function isNewspaperNonPublicationDay(
   admin: AdminSettings,
   date: ISODateString,
@@ -123,15 +146,16 @@ export function buildDemandSlotsForDate(
     const earlyN = ov?.weekdaySlots?.early ?? 1;
     const lateN = ov?.weekdaySlots?.late ?? 1;
     const monthly = lookupCongressMonthly(admin, date);
-    const inDiet = isInAnyDietSession(admin, date);
+    const inDietToday = isInAnyDietSession(admin, date);
+    const weekly = lookupCongressWeekly(admin, date);
+    const twoSeatCongressDay = inDietToday || weekBlockIntersectsDietSession(admin, date);
     for (let i = 0; i < earlyN; i++) {
       slots.push({ id: `early-${i}`, kind: "早番" });
     }
     for (let i = 0; i < lateN; i++) {
       slots.push({ id: `late-${i}`, kind: "遅番" });
     }
-    if (inDiet) {
-      const weekly = lookupCongressWeekly(admin, date);
+    if (twoSeatCongressDay) {
       slots.push({
         id: "congress-month",
         kind: "国会月番",
@@ -172,6 +196,13 @@ export function buildEventsColumnText(
   const hol = holidayNameOn(date, holidayExtra);
   if (hol) parts.push(hol);
   if (isInAnyDietSession(admin, date)) parts.push("国会会期中");
+  if (
+    isWeekdayMonFri(date) &&
+    weekBlockIntersectsDietSession(admin, date) &&
+    !isInAnyDietSession(admin, date)
+  ) {
+    parts.push("国会会期にかかる週");
+  }
   if (isNewspaperNonPublicationDay(admin, date)) parts.push("新聞休刊作業日");
   if (isGraphExclusiveForIsobe(admin, date)) parts.push("グラフ専任（磯田）");
   return parts.join("／");

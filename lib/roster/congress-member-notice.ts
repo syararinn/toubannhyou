@@ -1,10 +1,7 @@
 import type { AdminSettings, DutyMember, ISODateString } from "@/types";
 import { mondayBasedWeekIndexInMonth, yearMonthFromIso } from "./congress-week";
 import { isWeekdayMonFri } from "./dates";
-
-function isInAnyDietSession(admin: AdminSettings, date: ISODateString): boolean {
-  return admin.dietSessions.some((p) => date >= p.start && date <= p.end);
-}
+import { isInAnyDietSession, weekBlockIntersectsDietSession } from "./slots";
 
 /**
  * 選択部員がその平日に国会月当番／国会週当番として事前指定されているか（管理者設定ベース）
@@ -21,7 +18,7 @@ export function getMemberCongressDutyLabels(
   if (monthly === member) {
     labels.push("この日は国会月当番です（管理者が事前に固定指定）。");
   }
-  if (isInAnyDietSession(admin, date)) {
+  if (isInAnyDietSession(admin, date) || weekBlockIntersectsDietSession(admin, date)) {
     const wk = mondayBasedWeekIndexInMonth(date);
     const weekly = admin.congressWeeklyAssignments.find(
       (a) => a.yearMonth === ym && a.weekIndexInMonth === wk,
