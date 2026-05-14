@@ -1,0 +1,568 @@
+"use client";
+
+import { useCallback, useMemo, useState } from "react";
+import type {
+  DutyMember,
+  ISODateString,
+  MemberDayPreferenceFlags,
+  MemberPreferenceInput,
+} from "@/types";
+import { DEFAULT_PREFERENCE_MONTHLY_CAPS, ROSTER_COLUMN_ORDER } from "@/types";
+
+const DUTY_MEMBERS = ROSTER_COLUMN_ORDER.filter(
+  (name): name is DutyMember => name !== "牛田" && name !== "倉科",
+);
+
+const WEEKDAY_JA = ["日", "月", "火", "水", "木", "金", "土"] as const;
+
+function emptyFlags(): MemberDayPreferenceFlags {
+  return {
+    fullDayOff: false,
+    fullyUnavailable: false,
+    morningHalfOff: false,
+    afternoonHalfOff: false,
+    nightUnavailable: false,
+  };
+}
+
+function pad2(n: number): string {
+  return n < 10 ? `0${n}` : String(n);
+}
+
+function toISODate(y: number, m0: number, d: number): ISODateString {
+  return `${y}-${pad2(m0 + 1)}-${pad2(d)}`;
+}
+
+function listDatesInMonth(year: number, month0: number): ISODateString[] {
+  const last = new Date(year, month0 + 1, 0).getDate();
+  const out: ISODateString[] = [];
+  for (let d = 1; d <= last; d++) {
+    out.push(toISODate(year, month0, d));
+  }
+  return out;
+}
+
+/** 他部員の「休・✖」希望件数のモック（日付に依存する固定乱数）。API 接続時はサーバ集計に差し替え */
+function mockOtherMembersHardOffCount(date: ISODateString): number {
+  let h = 0;
+  const s = `${date}|peer-mock-v1`;
+  for (let i = 0; i < s.length; i++) {
+    h = (Math.imul(h, 31) + s.charCodeAt(i)) | 0;
+  }
+  return Math.abs(h) % 7;
+}
+
+/**
+ * 平日は早番・遅番で最低 2 名が必要なため、
+ * 「休・✖」希望が多すぎる日は配置不能に近いとみなして警告する。
+ */
+function isHighCongestionRisk(
+  date: ISODateString,
+  flags: MemberDayPreferenceFlags,
+): boolean {
+  const userHard = flags.fullDayOff || flags.fullyUnavailable ? 1 : 0;
+  const peers = mockOtherMembersHardOffCount(date);
+  return peers + userHard >= 6;
+}
+
+function countMonthlyUsage(
+  flagsByDate: Record<ISODateString, MemberDayPreferenceFlags>,
+  year: number,
+  month0: number,
+): { baseMarks: number; nightMarks: number } {
+  let baseMarks = 0;
+  let nightMarks = 0;
+  for (const date of listDatesInMonth(year, month0)) {
+    const f = flagsByDate[date] ?? emptyFlags();
+    if (f.fullDayOff) baseMarks += 1;
+    if (f.fullyUnavailable) baseMarks += 1;
+    if (f.morningHalfOff) baseMarks += 1;
+    if (f.afternoonHalfOff) baseMarks += 1;
+    if (f.nightUnavailable) nightMarks += 1;
+  }
+  return { baseMarks, nightMarks };
+}
+
+function Section({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="rounded-2xl border border-neutral-200 bg-white p-6 shadow-sm dark:border-neutral-800 dark:bg-neutral-950">
+      <h2 className="text-lg font-semibold tracking-tight text-neutral-900 dark:text-neutral-100">
+        {title}
+      </h2>
+      {description ? (
+        <p className="mt-1 text-sm text-neutral-600 dark:text-neutral-400">
+          {description}
+        </p>
+      ) : null}
+      <div className="mt-5 space-y-4">{children}</div>
+    </section>
+  );
+}
+
+const btnPrimary =
+  "inline-flex items-center justify-center rounded-lg bg-neutral-900 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-neutral-800 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-white";
+
+const btnSecondary =
+  "inline-flex items-center justify-center rounded-lg border border-neutral-300 bg-white px-4 py-2 text-sm font-medium text-neutral-800 shadow-sm transition hover:bg-neutral-50 dark:border-neutral-600 dark:bg-neutral-900 dark:text-neutral-100 dark:hover:bg-neutral-800";
+
+const AI_RULES_PUBLIC_TEXT = [
+  "勤務の前後に十分なインターバルが確保されるよう配慮します。",
+  "当番の回数が極端に偏らないよう、全員が公平になるよう調整を試みます。",
+  "ご入力いただいた希望は可能な範囲で尊重しますが、全体の制約を満たす必要があるため、すべてが通るとは限りません。",
+  "国会会期・休刊作業日・グラフ専任・出向など、管理者が登録した条件は必ず守られます。",
+  "最終的な割当はシステムが複数の条件を総合して決定します。",
+] as const;
+
+export default function MemberInputPage() {
+  const now = useMemo(() => new Date(), []);
+  const [year, setYear] = useState(now.getFullYear());
+  const [month0, setMonth0] = useState(now.getMonth());
+
+  const [selectedMember, setSelectedMember] = useState<DutyMember | null>(null);
+  const [prefsByMember, setPrefsByMember] = useState<
+    Record<DutyMember, Record<ISODateString, MemberDayPreferenceFlags>>
+  >(() => {
+    const init = {} as Record<DutyMember, Record<ISODateString, MemberDayPreferenceFlags>>;
+    for (const m of DUTY_MEMBERS) {
+      init[m] = {};
+    }
+    return init;
+  });
+
+  const [rulesOpen, setRulesOpen] = useState(false);
+  const [viewMode, setViewMode] = useState<"list" | "calendar">("list");
+
+  const caps = DEFAULT_PREFERENCE_MONTHLY_CAPS;
+
+  const flagsByDate = selectedMember ? prefsByMember[selectedMember] : {};
+  const { baseMarks, nightMarks } = useMemo(
+    () => countMonthlyUsage(flagsByDate, year, month0),
+    [flagsByDate, year, month0],
+  );
+
+  const baseOver = baseMarks > caps.maxBasePreferenceMarksPerMonth;
+  const nightOver = nightMarks > caps.maxNightUnavailableMarksPerMonth;
+
+  const monthDates = useMemo(() => listDatesInMonth(year, month0), [year, month0]);
+
+  const leadingBlanks = useMemo(() => {
+    const first = new Date(year, month0, 1).getDay();
+    return first;
+  }, [year, month0]);
+
+  const snapshot: MemberPreferenceInput | null = useMemo(() => {
+    if (!selectedMember) return null;
+    const entries = Object.entries(prefsByMember[selectedMember])
+      .filter(([, f]) =>
+        Object.values(f).some(Boolean),
+      )
+      .map(([date, flags]) => ({ date: date as ISODateString, flags }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+    return { dutyMember: selectedMember, entries };
+  }, [selectedMember, prefsByMember]);
+
+  const setFlag = useCallback(
+    (date: ISODateString, patch: Partial<MemberDayPreferenceFlags>) => {
+      if (!selectedMember) return;
+      setPrefsByMember((prev) => {
+        const memberMap = { ...prev[selectedMember] };
+        const cur = { ...(memberMap[date] ?? emptyFlags()), ...patch };
+        if (
+          !cur.fullDayOff &&
+          !cur.fullyUnavailable &&
+          !cur.morningHalfOff &&
+          !cur.afternoonHalfOff &&
+          !cur.nightUnavailable
+        ) {
+          delete memberMap[date];
+        } else {
+          memberMap[date] = cur;
+        }
+        return { ...prev, [selectedMember]: memberMap };
+      });
+    },
+    [selectedMember],
+  );
+
+  function applyExclusiveRules(
+    date: ISODateString,
+    next: MemberDayPreferenceFlags,
+  ): MemberDayPreferenceFlags {
+    let f = { ...next };
+    if (f.fullDayOff) {
+      f = {
+        ...f,
+        fullyUnavailable: false,
+        morningHalfOff: false,
+        afternoonHalfOff: false,
+        nightUnavailable: false,
+      };
+    }
+    if (f.fullyUnavailable) {
+      f = {
+        ...f,
+        fullDayOff: false,
+        morningHalfOff: false,
+        afternoonHalfOff: false,
+        nightUnavailable: false,
+      };
+    }
+    if (f.morningHalfOff || f.afternoonHalfOff) {
+      f = { ...f, fullDayOff: false, fullyUnavailable: false };
+    }
+    return f;
+  }
+
+  function toggleFlag(
+    date: ISODateString,
+    key: keyof MemberDayPreferenceFlags,
+    checked: boolean,
+  ) {
+    const cur = { ...(flagsByDate[date] ?? emptyFlags()), [key]: checked };
+    const merged = applyExclusiveRules(date, cur);
+    setFlag(date, merged);
+  }
+
+  function monthTitle(): string {
+    return `${year}年${month0 + 1}月`;
+  }
+
+  function shiftMonth(delta: number) {
+    const d = new Date(year, month0 + delta, 1);
+    setYear(d.getFullYear());
+    setMonth0(d.getMonth());
+  }
+
+  function summaryDots(f: MemberDayPreferenceFlags | undefined): string {
+    if (!f) return "";
+    const parts: string[] = [];
+    if (f.fullDayOff) parts.push("休");
+    if (f.fullyUnavailable) parts.push("✖");
+    if (f.morningHalfOff) parts.push("前");
+    if (f.afternoonHalfOff) parts.push("後");
+    if (f.nightUnavailable) parts.push("夜");
+    return parts.join("·");
+  }
+
+  return (
+    <div className="min-h-screen bg-neutral-50 pb-16 dark:bg-neutral-950">
+      <header className="border-b border-neutral-200 bg-white/80 backdrop-blur dark:border-neutral-800 dark:bg-neutral-950/80">
+        <div className="mx-auto flex max-w-3xl flex-col gap-3 px-4 py-8 sm:px-6">
+          <p className="text-xs font-medium uppercase tracking-wider text-neutral-500 dark:text-neutral-400">
+            部員向け
+          </p>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <h1 className="text-2xl font-semibold tracking-tight text-neutral-900 dark:text-neutral-50">
+                シフト希望の入力
+              </h1>
+              <p className="mt-1 text-sm text-neutral-600 dark:text-neutral-400">
+                ご自身の氏名を選び、対象月の各日に希望を入力してください（現在はブラウザ内のみに保存されるモックです）。
+              </p>
+            </div>
+            <button type="button" className={btnSecondary} onClick={() => setRulesOpen(true)}>
+              AIによる生成ルールを見る
+            </button>
+          </div>
+          <aside className="rounded-xl border border-amber-200/80 bg-amber-50/90 px-4 py-3 text-sm text-amber-950 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-100">
+            <p className="font-medium">仕様の透明化</p>
+            <p className="mt-1 text-amber-900/90 dark:text-amber-200/90">
+              当番表は、勤務間インターバルや公平な回数配分など、公開している基本方針に沿って自動生成されます。詳しくは右上の「AIによる生成ルールを見る」を開いてください。
+            </p>
+          </aside>
+        </div>
+      </header>
+
+      <main className="mx-auto flex max-w-3xl flex-col gap-8 px-4 py-10 sm:px-6">
+        <Section
+          title="部員を選択"
+          description="7 名の部員のうち、入力するご自身を選んでください。"
+        >
+          <div className="flex flex-wrap gap-2">
+            {DUTY_MEMBERS.map((name) => (
+              <button
+                key={name}
+                type="button"
+                onClick={() => setSelectedMember(name)}
+                className={`rounded-full border px-4 py-2 text-sm font-medium transition ${
+                  selectedMember === name
+                    ? "border-neutral-900 bg-neutral-900 text-white dark:border-neutral-100 dark:bg-neutral-100 dark:text-neutral-900"
+                    : "border-neutral-300 bg-white text-neutral-800 hover:border-neutral-400 dark:border-neutral-600 dark:bg-neutral-900 dark:text-neutral-100 dark:hover:border-neutral-500"
+                }`}
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+          {!selectedMember ? (
+            <p className="text-sm text-neutral-500">氏名を選ぶと、下の入力欄が有効になります。</p>
+          ) : null}
+        </Section>
+
+        {selectedMember ? (
+          <>
+            <Section
+              title={`希望入力（${monthTitle()}・${selectedMember}）`}
+              description="各日について「休」「✖️」「午前半休」「午後半休」「夜✖️」から該当するものにチェックを入れます。休・✖️は他の全日系・半休と同時には選べません。"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <button type="button" className={btnSecondary} onClick={() => shiftMonth(-1)}>
+                    前月
+                  </button>
+                  <span className="min-w-[8rem] text-center text-sm font-semibold tabular-nums text-neutral-900 dark:text-neutral-100">
+                    {monthTitle()}
+                  </span>
+                  <button type="button" className={btnSecondary} onClick={() => shiftMonth(1)}>
+                    翌月
+                  </button>
+                </div>
+                <div className="inline-flex rounded-lg border border-neutral-200 p-0.5 dark:border-neutral-700">
+                  <button
+                    type="button"
+                    className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
+                      viewMode === "list"
+                        ? "bg-neutral-900 text-white shadow dark:bg-neutral-100 dark:text-neutral-900"
+                        : "text-neutral-600 dark:text-neutral-400"
+                    }`}
+                    onClick={() => setViewMode("list")}
+                  >
+                    リスト
+                  </button>
+                  <button
+                    type="button"
+                    className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
+                      viewMode === "calendar"
+                        ? "bg-neutral-900 text-white shadow dark:bg-neutral-100 dark:text-neutral-900"
+                        : "text-neutral-600 dark:text-neutral-400"
+                    }`}
+                    onClick={() => setViewMode("calendar")}
+                  >
+                    カレンダー
+                  </button>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-neutral-200 p-4 dark:border-neutral-800">
+                <div className="flex flex-wrap gap-4 text-sm">
+                  <p className="text-neutral-700 dark:text-neutral-300">
+                    基本グループ（休・✖️・午前半休・午後半休）の合算:{" "}
+                    <span className="font-semibold tabular-nums">{baseMarks}</span> /{" "}
+                    {caps.maxBasePreferenceMarksPerMonth}
+                  </p>
+                  <p className="text-neutral-700 dark:text-neutral-300">
+                    夜✖️:{" "}
+                    <span className="font-semibold tabular-nums">{nightMarks}</span> /{" "}
+                    {caps.maxNightUnavailableMarksPerMonth}
+                  </p>
+                </div>
+                {baseOver ? (
+                  <p className="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-100">
+                    基本グループの上限を超えています。<strong>部長へ申請してください。</strong>
+                  </p>
+                ) : null}
+                {nightOver ? (
+                  <p className="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-100">
+                    「夜✖️」の上限を超えています。<strong>部長へ申請してください。</strong>
+                  </p>
+                ) : null}
+              </div>
+
+              {viewMode === "calendar" ? (
+                <div className="overflow-x-auto">
+                  <div className="grid min-w-[280px] grid-cols-7 gap-1 text-center text-xs font-medium text-neutral-500 dark:text-neutral-400">
+                    {WEEKDAY_JA.map((w) => (
+                      <div key={w} className="py-2">
+                        {w}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="grid min-w-[280px] grid-cols-7 gap-1">
+                    {Array.from({ length: leadingBlanks }).map((_, i) => (
+                      <div key={`blank-${i}`} className="aspect-square" />
+                    ))}
+                    {monthDates.map((date) => {
+                      const d = Number(date.slice(8, 10));
+                      const f = flagsByDate[date];
+                      const congested = isHighCongestionRisk(date, f ?? emptyFlags());
+                      const dots = summaryDots(f);
+                      return (
+                        <div
+                          key={date}
+                          title={date}
+                          className={`flex aspect-square flex-col items-center justify-center rounded-lg border text-xs transition ${
+                            congested
+                              ? "border-red-300 bg-red-50/80 dark:border-red-900/60 dark:bg-red-950/30"
+                              : "border-neutral-200 bg-neutral-50 dark:border-neutral-800 dark:bg-neutral-900/60"
+                          }`}
+                        >
+                          <span className="font-semibold tabular-nums text-neutral-900 dark:text-neutral-100">
+                            {d}
+                          </span>
+                          {dots ? (
+                            <span className="mt-0.5 max-w-full truncate px-0.5 text-[10px] text-neutral-600 dark:text-neutral-400">
+                              {dots}
+                            </span>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <p className="mt-2 text-xs text-neutral-500 dark:text-neutral-500">
+                    カレンダーは月間の俯瞰用です。チェックの入出力はリスト表示で行ってください。
+                  </p>
+                </div>
+              ) : null}
+
+              {viewMode === "list" ? (
+                <div className="overflow-x-auto rounded-xl border border-neutral-200 dark:border-neutral-800">
+                  <table className="min-w-[720px] w-full border-collapse text-left text-sm">
+                    <thead>
+                      <tr className="border-b border-neutral-200 bg-neutral-50 dark:border-neutral-800 dark:bg-neutral-900/50">
+                        <th className="whitespace-nowrap px-3 py-2 font-medium text-neutral-700 dark:text-neutral-300">
+                          日付
+                        </th>
+                        <th className="whitespace-nowrap px-2 py-2 font-medium text-neutral-700 dark:text-neutral-300">
+                          曜
+                        </th>
+                        <th className="px-2 py-2 text-center font-medium text-neutral-700 dark:text-neutral-300">
+                          休
+                        </th>
+                        <th className="px-2 py-2 text-center font-medium text-neutral-700 dark:text-neutral-300">
+                          ✖️
+                        </th>
+                        <th className="px-2 py-2 text-center font-medium text-neutral-700 dark:text-neutral-300">
+                          午前半休
+                        </th>
+                        <th className="px-2 py-2 text-center font-medium text-neutral-700 dark:text-neutral-300">
+                          午後半休
+                        </th>
+                        <th className="px-2 py-2 text-center font-medium text-neutral-700 dark:text-neutral-300">
+                          夜✖️
+                        </th>
+                        <th className="min-w-[10rem] px-3 py-2 font-medium text-neutral-700 dark:text-neutral-300">
+                          注意
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {monthDates.map((date) => {
+                        const f = flagsByDate[date] ?? emptyFlags();
+                        const wd = new Date(date + "T12:00:00").getDay();
+                        const congested = isHighCongestionRisk(date, f);
+                        return (
+                          <tr
+                            key={date}
+                            className="border-b border-neutral-100 odd:bg-white even:bg-neutral-50/80 dark:border-neutral-800/80 dark:odd:bg-neutral-950 dark:even:bg-neutral-900/40"
+                          >
+                            <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-neutral-800 dark:text-neutral-200">
+                              {date}
+                            </td>
+                            <td className="whitespace-nowrap px-2 py-2 text-neutral-600 dark:text-neutral-400">
+                              {WEEKDAY_JA[wd]}
+                            </td>
+                            {(
+                              [
+                                ["fullDayOff", f.fullDayOff],
+                                ["fullyUnavailable", f.fullyUnavailable],
+                                ["morningHalfOff", f.morningHalfOff],
+                                ["afternoonHalfOff", f.afternoonHalfOff],
+                                ["nightUnavailable", f.nightUnavailable],
+                              ] as const
+                            ).map(([key, checked]) => (
+                              <td key={key} className="px-2 py-2 text-center align-middle">
+                                <input
+                                  type="checkbox"
+                                  className="h-4 w-4 rounded border-neutral-300 dark:border-neutral-600"
+                                  checked={checked}
+                                  onChange={(e) =>
+                                    toggleFlag(date, key, e.target.checked)
+                                  }
+                                />
+                              </td>
+                            ))}
+                            <td className="px-3 py-2 text-xs">
+                              {congested ? (
+                                <span className="text-red-700 dark:text-red-400">
+                                  この日は休・✖️希望が集中しやすく、配置が成立しづらい可能性があります。
+                                </span>
+                              ) : (
+                                <span className="text-neutral-400">—</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
+            </Section>
+
+            <Section
+              title="保持中の希望データ（確認用）"
+              description="選択中の部員について、型 MemberPreferenceInput 相当の JSON です。"
+            >
+              <pre className="max-h-72 overflow-auto rounded-xl bg-neutral-900 p-4 text-xs leading-relaxed text-neutral-100">
+                {JSON.stringify(snapshot, null, 2)}
+              </pre>
+            </Section>
+          </>
+        ) : null}
+      </main>
+
+      {rulesOpen ? (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-4 sm:items-center"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="rules-title"
+          onClick={() => setRulesOpen(false)}
+        >
+          <div
+            className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-neutral-200 bg-white p-6 shadow-xl dark:border-neutral-700 dark:bg-neutral-950"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <h2
+                id="rules-title"
+                className="text-lg font-semibold text-neutral-900 dark:text-neutral-50"
+              >
+                AI による当番表生成の基本方針
+              </h2>
+              <button
+                type="button"
+                className="rounded-lg px-2 py-1 text-sm text-neutral-500 hover:bg-neutral-100 hover:text-neutral-800 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
+                onClick={() => setRulesOpen(false)}
+                aria-label="閉じる"
+              >
+                ✕
+              </button>
+            </div>
+            <p className="mt-2 text-sm text-neutral-600 dark:text-neutral-400">
+              部員の皆さまに公開しているルールの要約です。細部の調整処理はシステム内部で行われます。
+            </p>
+            <ul className="mt-4 list-disc space-y-2 pl-5 text-sm text-neutral-800 dark:text-neutral-200">
+              {AI_RULES_PUBLIC_TEXT.map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+            <div className="mt-6 flex justify-end">
+              <button type="button" className={btnPrimary} onClick={() => setRulesOpen(false)}>
+                閉じる
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
