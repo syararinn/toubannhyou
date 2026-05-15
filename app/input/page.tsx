@@ -9,7 +9,6 @@ import type {
   MemberPreferenceInput,
 } from "@/types";
 import {
-  DEFAULT_PREFERENCE_MONTHLY_CAPS,
   ROSTER_COLUMN_ORDER,
 } from "@/types";
 import { PreferenceLimitApplicationPanel } from "@/components/PreferenceLimitApplicationPanel";
@@ -200,7 +199,10 @@ export default function MemberInputPage() {
 
   const yearMonth = yearMonthFromParts(year, month0);
 
-  const flagsByDate = selectedMember ? prefsByMember[selectedMember] : {};
+  const flagsByDate = useMemo<Record<ISODateString, MemberDayPreferenceFlags>>(
+    () => (selectedMember ? prefsByMember[selectedMember] : {}),
+    [prefsByMember, selectedMember],
+  );
   const restCrossMarks = useMemo(
     () => countRestCrossMarks(flagsByDate, year, month0),
     [flagsByDate, year, month0],
