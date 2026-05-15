@@ -9,7 +9,6 @@ import type {
   MemberPreferenceInput,
 } from "@/types";
 import {
-  DEFAULT_PREFERENCE_MONTHLY_CAPS,
   ROSTER_COLUMN_ORDER,
 } from "@/types";
 import { PreferenceLimitApplicationPanel } from "@/components/PreferenceLimitApplicationPanel";
@@ -37,6 +36,12 @@ import {
   type PreferenceToggleKey,
 } from "@/lib/preferenceLimits";
 import { getMemberCongressDutyLabels } from "@/lib/roster/congress-member-notice";
+import { isWeekdayMonFri } from "@/lib/roster/dates";
+import {
+  isGraphExclusiveForIsobe,
+  isInAnyDietSession,
+  weekBlockIntersectsDietSession,
+} from "@/lib/roster/slots";
 import { DEFAULT_HALF_DAY_MARKS_PER_MONTH } from "@/types";
 
 const DUTY_MEMBERS = ROSTER_COLUMN_ORDER.filter(
@@ -60,29 +65,6 @@ function listDatesInMonth(year: number, month0: number): ISODateString[] {
     out.push(toISODate(year, month0, d));
   }
   return out;
-}
-
-/** 他部員の「休・✖」希望件数のモック（日付に依存する固定乱数）。API 接続時はサーバ集計に差し替え */
-function mockOtherMembersHardOffCount(date: ISODateString): number {
-  let h = 0;
-  const s = `${date}|peer-mock-v1`;
-  for (let i = 0; i < s.length; i++) {
-    h = (Math.imul(h, 31) + s.charCodeAt(i)) | 0;
-  }
-  return Math.abs(h) % 7;
-}
-
-/**
- * 平日は早番・遅番で最低 2 名が必要なため、
- * 「休・✖」希望が多すぎる日は配置不能に近いとみなして警告する。
- */
-function isHighCongestionRisk(
-  date: ISODateString,
-  flags: MemberDayPreferenceFlags,
-): boolean {
-  const userHard = flags.fullDayOff || flags.fullyUnavailable ? 1 : 0;
-  const peers = mockOtherMembersHardOffCount(date);
-  return peers + userHard >= 6;
 }
 
 function Section({
@@ -125,6 +107,50 @@ const AI_RULES_PUBLIC_TEXT = [
   "国会会期・休刊作業日・グラフ専任・出向など、管理者が登録した条件は必ず守られます。",
   "最終的な割当はシステムが複数の条件を総合して決定します。",
 ] as const;
+
+type StaffingRisk = {
+  isTwoSeatCongressDay: boolean;
+  unavailableCount: number;
+  atLimit: boolean;
+};
+
+function isHardUnavailable(flags: MemberDayPreferenceFlags | undefined): boolean {
+  return Boolean(flags?.fullDayOff || flags?.fullyUnavailable);
+}
+
+function getStaffingRisk(
+  admin: AdminSettings,
+  prefsByMember: Record<DutyMember, Record<ISODateString, MemberDayPreferenceFlags>>,
+  date: ISODateString,
+): StaffingRisk {
+  const isTwoSeatCongressDay =
+    isWeekdayMonFri(date) &&
+    (isInAnyDietSession(admin, date) || weekBlockIntersectsDietSession(admin, date));
+  if (!isTwoSeatCongressDay) {
+    return { isTwoSeatCongressDay, unavailableCount: 0, atLimit: false };
+  }
+
+  let unavailableCount = 0;
+  for (const member of DUTY_MEMBERS) {
+    if (admin.secondmentByDutyMember[member] === "on_loan") {
+      unavailableCount += 1;
+      continue;
+    }
+    if (member === "磯田" && isGraphExclusiveForIsobe(admin, date)) {
+      unavailableCount += 1;
+      continue;
+    }
+    if (isHardUnavailable(prefsByMember[member][date])) {
+      unavailableCount += 1;
+    }
+  }
+
+  return {
+    isTwoSeatCongressDay,
+    unavailableCount,
+    atLimit: unavailableCount >= 3,
+  };
+}
 
 export default function MemberInputPage() {
   const now = useMemo(() => new Date(), []);
@@ -173,7 +199,10 @@ export default function MemberInputPage() {
 
   const yearMonth = yearMonthFromParts(year, month0);
 
-  const flagsByDate = selectedMember ? prefsByMember[selectedMember] : {};
+  const flagsByDate = useMemo<Record<ISODateString, MemberDayPreferenceFlags>>(
+    () => (selectedMember ? prefsByMember[selectedMember] : {}),
+    [prefsByMember, selectedMember],
+  );
   const restCrossMarks = useMemo(
     () => countRestCrossMarks(flagsByDate, year, month0),
     [flagsByDate, year, month0],
@@ -495,7 +524,7 @@ export default function MemberInputPage() {
                     {monthDates.map((date) => {
                       const d = Number(date.slice(8, 10));
                       const f = flagsByDate[date];
-                      const congested = isHighCongestionRisk(date, f ?? emptyPreferenceFlags());
+                      const staffingRisk = getStaffingRisk(adminSnapshot, prefsByMember, date);
                       const dots = summaryDots(f);
                       const congressLabels =
                         selectedMember !== null
@@ -507,19 +536,25 @@ export default function MemberInputPage() {
                           key={date}
                           title={date}
                           className={`flex aspect-square flex-col items-center justify-center rounded-lg border text-xs transition ${
-                            congressDay
+                            staffingRisk.atLimit
+                              ? "border-red-400 bg-red-50/90 dark:border-red-800 dark:bg-red-950/40"
+                              : congressDay
                               ? "border-amber-400 bg-amber-100/90 dark:border-amber-700 dark:bg-amber-950/50"
-                              : congested
-                                ? "border-red-300 bg-red-50/80 dark:border-red-900/60 dark:bg-red-950/30"
-                                : "border-neutral-200 bg-neutral-50 dark:border-neutral-800 dark:bg-neutral-900/60"
+                              : "border-neutral-200 bg-neutral-50 dark:border-neutral-800 dark:bg-neutral-900/60"
                           }`}
                         >
                           <span className="font-semibold tabular-nums text-neutral-900 dark:text-neutral-100">
                             {d}
                           </span>
-                          {congressDay ? (
-                            <span className="mt-0.5 max-w-full truncate px-0.5 text-[9px] font-medium text-amber-900 dark:text-amber-200">
-                              国会
+                          {staffingRisk.atLimit || congressDay ? (
+                            <span
+                              className={`mt-0.5 max-w-full truncate px-0.5 text-[9px] font-medium ${
+                                staffingRisk.atLimit
+                                  ? "text-red-800 dark:text-red-200"
+                                  : "text-amber-900 dark:text-amber-200"
+                              }`}
+                            >
+                              {staffingRisk.atLimit ? "人員注意" : "国会"}
                             </span>
                           ) : null}
                           {dots ? (
@@ -572,7 +607,7 @@ export default function MemberInputPage() {
                       {monthDates.map((date) => {
                         const f = flagsByDate[date] ?? emptyPreferenceFlags();
                         const wd = new Date(date + "T12:00:00").getDay();
-                        const congested = isHighCongestionRisk(date, f);
+                        const staffingRisk = getStaffingRisk(adminSnapshot, prefsByMember, date);
                         const congressLabels = getMemberCongressDutyLabels(
                           adminSnapshot,
                           date,
@@ -582,10 +617,12 @@ export default function MemberInputPage() {
                         return (
                           <tr
                             key={date}
-                            className={`border-b border-neutral-100 odd:bg-white even:bg-neutral-50/80 dark:border-neutral-800/80 dark:odd:bg-neutral-950 dark:even:bg-neutral-900/40 ${
-                              congressDay
-                                ? "border-l-4 border-l-amber-500 bg-amber-50/70 dark:bg-amber-950/25"
-                                : ""
+                            className={`border-b border-neutral-100 dark:border-neutral-800/80 ${
+                              staffingRisk.atLimit
+                                ? "border-l-4 border-l-red-600 bg-red-50/90 dark:bg-red-950/35"
+                                : congressDay
+                                  ? "border-l-4 border-l-amber-500 bg-amber-50/70 dark:bg-amber-950/25"
+                                  : "odd:bg-white even:bg-neutral-50/80 dark:odd:bg-neutral-950 dark:even:bg-neutral-900/40"
                             }`}
                           >
                             <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-neutral-800 dark:text-neutral-200">
@@ -624,12 +661,17 @@ export default function MemberInputPage() {
                                     {line}
                                   </div>
                                 ))}
-                                {congested ? (
-                                  <span className="text-red-700 dark:text-red-400">
-                                    この日は休・✖️希望が集中しやすく、配置が成立しづらい可能性があります。
-                                  </span>
+                                {staffingRisk.atLimit ? (
+                                  <div className="rounded-md border border-red-300 bg-red-50 px-2 py-1 font-medium text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300">
+                                    メンバー不足です。部員間で調整してください。
+                                    <span className="block font-normal">
+                                      国会2名体制の日に、出向・グラフ専任・休/✖で
+                                      {staffingRisk.unavailableCount}
+                                      名が割り当てできない状態です。夜✖️のみの場合は早番に入れるため、この人数には含めません。
+                                    </span>
+                                  </div>
                                 ) : null}
-                                {!congressLabels.length && !congested ? (
+                                {!congressLabels.length && !staffingRisk.atLimit ? (
                                   <span className="text-neutral-400">—</span>
                                 ) : null}
                               </div>
