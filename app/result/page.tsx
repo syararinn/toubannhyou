@@ -1,8 +1,16 @@
 "use client";
 
 import { Fragment, useCallback, useMemo, useState, type ReactNode } from "react";
-import type { GeneratedRosterDay, RosterColumnPerson } from "@/types";
+import type {
+  DutyMember,
+  GeneratedRosterDay,
+  ISODateString,
+  MemberPreferenceInput,
+  RosterColumnPerson,
+} from "@/types";
 import { ROSTER_COLUMN_ORDER } from "@/types";
+import { loadAdminSettingsFromStorage } from "@/lib/adminSettingsStorage";
+import { loadMemberPreferencesFromStorage } from "@/lib/memberPreferencesStorage";
 import { csvWithUtf8Bom, rosterDaysToCsv } from "@/lib/roster/csv";
 import { DEMO_ROSTER_RANGE, demoAdminSettings, demoPreferencesByMember } from "@/lib/roster/demo";
 import { generateRoster, type UnfilledSlot } from "@/lib/roster/generate";
@@ -12,6 +20,71 @@ const btnPrimary =
 
 const btnSecondary =
   "inline-flex items-center justify-center rounded-lg border border-neutral-300 bg-white px-4 py-2 text-sm font-medium text-neutral-800 shadow-sm transition hover:bg-neutral-50 dark:border-neutral-600 dark:bg-neutral-900 dark:text-neutral-100 dark:hover:bg-neutral-800";
+
+const DUTY_MEMBERS = ROSTER_COLUMN_ORDER.filter(
+  (name): name is DutyMember => name !== "牛田" && name !== "倉科",
+);
+
+type RosterRange = {
+  start: ISODateString;
+  end: ISODateString;
+};
+
+function pad2(n: number): string {
+  return n < 10 ? `0${n}` : String(n);
+}
+
+function toISODate(y: number, m0: number, d: number): ISODateString {
+  return `${y}-${pad2(m0 + 1)}-${pad2(d)}`;
+}
+
+function rangeForMonth(year: number, month0: number): RosterRange {
+  return {
+    start: toISODate(year, month0, 1),
+    end: toISODate(year, month0, new Date(year, month0 + 1, 0).getDate()),
+  };
+}
+
+function monthTitle(year: number, month0: number): string {
+  return `${year}年${month0 + 1}月`;
+}
+
+function storedPreferencesToGenerateInput(
+  range: RosterRange,
+): {
+  preferencesByMember: Partial<Record<DutyMember, MemberPreferenceInput>>;
+  memberCount: number;
+  entryCount: number;
+} {
+  const store = loadMemberPreferencesFromStorage();
+  const preferencesByMember: Partial<Record<DutyMember, MemberPreferenceInput>> = {};
+  let memberCount = 0;
+  let entryCount = 0;
+
+  for (const dutyMember of DUTY_MEMBERS) {
+    const entries = Object.entries(store[dutyMember])
+      .filter(([date, flags]) => {
+        return (
+          date >= range.start &&
+          date <= range.end &&
+          Object.values(flags).some(Boolean)
+        );
+      })
+      .map(([date, flags]) => ({
+        date: date as ISODateString,
+        flags,
+      }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    if (entries.length > 0) {
+      memberCount += 1;
+      entryCount += entries.length;
+    }
+    preferencesByMember[dutyMember] = { dutyMember, entries };
+  }
+
+  return { preferencesByMember, memberCount, entryCount };
+}
 
 function isSaturdayRow(row: GeneratedRosterDay): boolean {
   return row.weekdayLabel === "土";
@@ -122,8 +195,13 @@ function Section({
 }
 
 export default function ResultPage() {
+  const now = useMemo(() => new Date(), []);
+  const [year, setYear] = useState(now.getFullYear());
+  const [month0, setMonth0] = useState(now.getMonth());
   const [days, setDays] = useState<GeneratedRosterDay[] | null>(null);
   const [unfilled, setUnfilled] = useState<UnfilledSlot[] | null>(null);
+  const [generatedRange, setGeneratedRange] = useState<RosterRange | null>(null);
+  const [generationNote, setGenerationNote] = useState<string | null>(null);
 
   const runDemo = useCallback(() => {
     const { days: d, unfilled: u } = generateRoster({
@@ -134,7 +212,34 @@ export default function ResultPage() {
     });
     setDays(d);
     setUnfilled(u);
+    setGeneratedRange(DEMO_ROSTER_RANGE);
+    setGenerationNote("固定のデモデータで生成しました。");
   }, []);
+
+  const selectedRange = useMemo(() => rangeForMonth(year, month0), [year, month0]);
+
+  const shiftMonth = useCallback((delta: number) => {
+    const d = new Date(year, month0 + delta, 1);
+    setYear(d.getFullYear());
+    setMonth0(d.getMonth());
+  }, [month0, year]);
+
+  const runWithStoredPreferences = useCallback(() => {
+    const { preferencesByMember, memberCount, entryCount } =
+      storedPreferencesToGenerateInput(selectedRange);
+    const { days: d, unfilled: u } = generateRoster({
+      admin: loadAdminSettingsFromStorage(),
+      rangeStart: selectedRange.start,
+      rangeEnd: selectedRange.end,
+      preferencesByMember,
+    });
+    setDays(d);
+    setUnfilled(u);
+    setGeneratedRange(selectedRange);
+    setGenerationNote(
+      `${monthTitle(year, month0)}の保存済み希望を反映して生成しました（入力済み ${memberCount}名・${entryCount}日分）。`,
+    );
+  }, [month0, selectedRange, year]);
 
   const csvBlob = useMemo(() => {
     if (!days?.length) return null;
@@ -145,14 +250,14 @@ export default function ResultPage() {
   }, [days]);
 
   const downloadCsv = useCallback(() => {
-    if (!csvBlob || !days?.length) return;
+    if (!csvBlob || !days?.length || !generatedRange) return;
     const url = URL.createObjectURL(csvBlob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `当番表_${DEMO_ROSTER_RANGE.start}_${DEMO_ROSTER_RANGE.end}.csv`;
+    a.download = `当番表_${generatedRange.start}_${generatedRange.end}.csv`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [csvBlob, days]);
+  }, [csvBlob, days, generatedRange]);
 
   return (
     <div className="min-h-screen bg-neutral-50 pb-16 dark:bg-neutral-950">
@@ -173,8 +278,34 @@ export default function ResultPage() {
       <main className="mx-auto flex max-w-6xl flex-col gap-8 px-4 py-10 sm:px-6">
         <Section
           title="生成"
-          description={`デモ用データ（${DEMO_ROSTER_RANGE.start}〜${DEMO_ROSTER_RANGE.end}）で生成します。`}
+          description="デモデータでの確認に加えて、このブラウザに保存された入力画面の希望を使って当番表を生成できます。"
         >
+          <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-4 dark:border-neutral-800 dark:bg-neutral-900/40">
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="text-sm font-medium text-neutral-800 dark:text-neutral-100">
+                対象月
+              </span>
+              <button type="button" className={btnSecondary} onClick={() => shiftMonth(-1)}>
+                前月
+              </button>
+              <span className="min-w-[8rem] text-center text-sm font-semibold tabular-nums text-neutral-900 dark:text-neutral-100">
+                {monthTitle(year, month0)}
+              </span>
+              <button type="button" className={btnSecondary} onClick={() => shiftMonth(1)}>
+                翌月
+              </button>
+              <button
+                type="button"
+                className={btnPrimary}
+                onClick={runWithStoredPreferences}
+              >
+                現在の入力内容で当番表を生成
+              </button>
+            </div>
+            <p className="mt-3 text-xs leading-relaxed text-neutral-600 dark:text-neutral-400">
+              入力画面で同じブラウザに保存された全員分の希望と、管理者設定画面で保存された条件を使います。未入力の部員は希望なしとして扱います。
+            </p>
+          </div>
           <div className="flex flex-wrap gap-3">
             <button type="button" className={btnPrimary} onClick={runDemo}>
               デモデータで当番表を生成
@@ -188,6 +319,11 @@ export default function ResultPage() {
               CSV をダウンロード
             </button>
           </div>
+          {generationNote ? (
+            <p className="text-sm text-neutral-600 dark:text-neutral-400">
+              {generationNote}
+            </p>
+          ) : null}
         </Section>
 
         {unfilled && unfilled.length > 0 ? (
@@ -262,7 +398,7 @@ export default function ResultPage() {
           </Section>
         ) : (
           <p className="text-center text-sm text-neutral-500">
-            「デモデータで当番表を生成」を押すと表が表示されます。
+            「現在の入力内容で当番表を生成」または「デモデータで当番表を生成」を押すと表が表示されます。
           </p>
         )}
       </main>
