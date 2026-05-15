@@ -13,6 +13,7 @@ import type {
   WeekdaySlotHeadcount,
 } from "@/types";
 import { ROSTER_COLUMN_ORDER } from "@/types";
+import { PreferenceLimitApplicationsAdmin } from "@/components/PreferenceLimitApplicationsAdmin";
 import {
   loadAdminSettingsFromStorage,
   saveAdminSettingsToStorage,
@@ -604,6 +605,13 @@ export default function AdminSettingsPage() {
               ))}
             </div>
           )}
+        </Section>
+
+        <Section
+          title="希望上限の申請（部長承認）"
+          description="部員が月あたり最大5回まで提出する申請です。休・✖ と夜✖ の追加枠は別々に 0〜30 件まで指定でき、承認分は同月内で加算されます。翌月は加算分はリセットされ、既定の3件から再開します。"
+        >
+          <PreferenceLimitApplicationsAdmin />
         </Section>
 
         <Section title="保持中のデータ（確認用）" description="useState に載っている AdminSettings の JSON です。">

@@ -7,7 +7,14 @@ import type {
   RosterColumnPerson,
 } from "@/types";
 import { DUTY_MEMBER_RANK_ORDER_BY_MEMBER, ROSTER_COLUMN_ORDER } from "@/types";
-import { eachDateInclusive, isSaturday, isSunday, isWeekdayMonFri, weekdayLabelJa } from "./dates";
+import {
+  addDays,
+  eachDateInclusive,
+  isSaturday,
+  isSunday,
+  isWeekdayMonFri,
+  weekdayLabelJa,
+} from "./dates";
 import {
   compareForAssignment,
   getFlags,
@@ -249,6 +256,67 @@ function tryAssignCongressWithOuenFallback(
   unfilled.push({ date, slotId: slot.id, kind: slot.kind });
 }
 
+function isRestDay(
+  date: ISODateString,
+  holidayMap: Record<ISODateString, string>,
+): boolean {
+  return isSaturday(date) || isSunday(date) || Boolean(holidayNameOn(date, holidayMap));
+}
+
+/** 休日（土・日・祝）のメイン／予備出勤の連続を原則避ける（他に候補がいる限り）。 */
+function hadRestDayAttendanceYesterday(
+  member: DutyMember,
+  date: ISODateString,
+  yesterdayKind: Partial<Record<DutyMember, DutySlotKind>>,
+  holidayMap: Record<ISODateString, string>,
+): boolean {
+  const yesterday = addDays(date, -1);
+  if (!isRestDay(yesterday, holidayMap)) return false;
+  const k = yesterdayKind[member];
+  return k === "メイン" || k === "予備";
+}
+
+function preferAvoidConsecutiveRestDayAttendance(
+  pool: DutyMember[],
+  slotKind: DutySlotKind,
+  date: ISODateString,
+  yesterdayKind: Partial<Record<DutyMember, DutySlotKind>>,
+  holidayMap: Record<ISODateString, string>,
+): DutyMember[] {
+  if (!isRestDay(date, holidayMap)) return pool;
+  if (slotKind !== "メイン" && slotKind !== "予備") return pool;
+  const without = pool.filter(
+    (m) => !hadRestDayAttendanceYesterday(m, date, yesterdayKind, holidayMap),
+  );
+  return without.length > 0 ? without : pool;
+}
+
+/** 日曜・祝日のメイン出勤の翌日は早番を原則つけない（他に候補がいる限り）。 */
+function hadSunOrHolidayMainYesterday(
+  member: DutyMember,
+  date: ISODateString,
+  yesterdayKind: Partial<Record<DutyMember, DutySlotKind>>,
+  holidayMap: Record<ISODateString, string>,
+): boolean {
+  if (yesterdayKind[member] !== "メイン") return false;
+  const yesterday = addDays(date, -1);
+  return isSunday(yesterday) || Boolean(holidayNameOn(yesterday, holidayMap));
+}
+
+function preferAvoidEarlyAfterSunHolidayMain(
+  pool: DutyMember[],
+  slotKind: DutySlotKind,
+  date: ISODateString,
+  yesterdayKind: Partial<Record<DutyMember, DutySlotKind>>,
+  holidayMap: Record<ISODateString, string>,
+): DutyMember[] {
+  if (slotKind !== "早番") return pool;
+  const without = pool.filter(
+    (m) => !hadSunOrHolidayMainYesterday(m, date, yesterdayKind, holidayMap),
+  );
+  return without.length > 0 ? without : pool;
+}
+
 /** 日曜・祝日の予備は夜✖️の人を避ける（他に候補がいる限り）。土曜は予備枠がない想定。 */
 function preferNonNightForSundayHolidayReserve(
   pool: DutyMember[],
@@ -385,6 +453,8 @@ export function generateRoster(input: GenerateRosterInput): {
       }
 
       pool = preferNonNightForSundayHolidayReserve(pool, slot.kind, date, prefsMap, hol);
+      pool = preferAvoidConsecutiveRestDayAttendance(pool, slot.kind, date, yesterdayKind, hol);
+      pool = preferAvoidEarlyAfterSunHolidayMain(pool, slot.kind, date, yesterdayKind, hol);
       pool.sort((a, b) => compareForAssignment(a, b, dutyCounts));
       const pick = pool[0]!;
       assignedToday[pick] = slot.kind;

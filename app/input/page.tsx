@@ -12,27 +12,38 @@ import {
   DEFAULT_PREFERENCE_MONTHLY_CAPS,
   ROSTER_COLUMN_ORDER,
 } from "@/types";
+import { PreferenceLimitApplicationPanel } from "@/components/PreferenceLimitApplicationPanel";
 import {
   ADMIN_SETTINGS_UPDATED_EVENT,
   loadAdminSettingsFromStorage,
 } from "@/lib/adminSettingsStorage";
+import {
+  loadMemberPreferencesFromStorage,
+  saveMemberPreferencesToStorage,
+} from "@/lib/memberPreferencesStorage";
+import {
+  listApplicationsForMemberMonth,
+  loadPreferenceApplicationsFromStorage,
+  PREFERENCE_APPLICATIONS_UPDATED_EVENT,
+} from "@/lib/preferenceApplicationsStorage";
+import {
+  countHalfDayMarks,
+  countNightMarks,
+  countRestCrossMarks,
+  emptyPreferenceFlags,
+  getEffectivePreferenceCaps,
+  wouldExceedPreferenceCap,
+  yearMonthFromParts,
+  type PreferenceToggleKey,
+} from "@/lib/preferenceLimits";
 import { getMemberCongressDutyLabels } from "@/lib/roster/congress-member-notice";
+import { DEFAULT_HALF_DAY_MARKS_PER_MONTH } from "@/types";
 
 const DUTY_MEMBERS = ROSTER_COLUMN_ORDER.filter(
   (name): name is DutyMember => name !== "牛田" && name !== "倉科",
 );
 
 const WEEKDAY_JA = ["日", "月", "火", "水", "木", "金", "土"] as const;
-
-function emptyFlags(): MemberDayPreferenceFlags {
-  return {
-    fullDayOff: false,
-    fullyUnavailable: false,
-    morningHalfOff: false,
-    afternoonHalfOff: false,
-    nightUnavailable: false,
-  };
-}
 
 function pad2(n: number): string {
   return n < 10 ? `0${n}` : String(n);
@@ -74,24 +85,6 @@ function isHighCongestionRisk(
   return peers + userHard >= 6;
 }
 
-function countMonthlyUsage(
-  flagsByDate: Record<ISODateString, MemberDayPreferenceFlags>,
-  year: number,
-  month0: number,
-): { baseMarks: number; nightMarks: number } {
-  let baseMarks = 0;
-  let nightMarks = 0;
-  for (const date of listDatesInMonth(year, month0)) {
-    const f = flagsByDate[date] ?? emptyFlags();
-    if (f.fullDayOff) baseMarks += 1;
-    if (f.fullyUnavailable) baseMarks += 1;
-    if (f.morningHalfOff) baseMarks += 1;
-    if (f.afternoonHalfOff) baseMarks += 1;
-    if (f.nightUnavailable) nightMarks += 1;
-  }
-  return { baseMarks, nightMarks };
-}
-
 function Section({
   title,
   description,
@@ -127,6 +120,8 @@ const AI_RULES_PUBLIC_TEXT = [
   "当番の回数が極端に偏らないよう、全員が公平になるよう調整を試みます。",
   "ご入力いただいた希望は可能な範囲で尊重しますが、全体の制約を満たす必要があるため、すべてが通るとは限りません。",
   "「休」「✖️」はその日の当番を希望しないものです。「夜✖️」は遅番と休日の出勤（土日祝のメイン枠）を希望しないものです。早番は可で、休日の予備は原則避けますが、どうしても人手が足りないときのみ割り当て得ます。",
+  "日曜・祝日にメイン出勤した方の翌日は、原則として早番には入りません。他に配置できる人がいない場合のみ早番になることがあります。",
+  "土曜・日曜・祝日の出勤は、原則として休日の連続出勤にはしません。他に配置できる人がいない場合のみ、休日が続いても出勤になることがあります。",
   "国会会期・休刊作業日・グラフ専任・出向など、管理者が登録した条件は必ず守られます。",
   "最終的な割当はシステムが複数の条件を総合して決定します。",
 ] as const;
@@ -139,13 +134,10 @@ export default function MemberInputPage() {
   const [selectedMember, setSelectedMember] = useState<DutyMember | null>(null);
   const [prefsByMember, setPrefsByMember] = useState<
     Record<DutyMember, Record<ISODateString, MemberDayPreferenceFlags>>
-  >(() => {
-    const init = {} as Record<DutyMember, Record<ISODateString, MemberDayPreferenceFlags>>;
-    for (const m of DUTY_MEMBERS) {
-      init[m] = {};
-    }
-    return init;
-  });
+  >(() => loadMemberPreferencesFromStorage());
+
+  const [applicationsTick, setApplicationsTick] = useState(0);
+  const [capBlockMessage, setCapBlockMessage] = useState<string | null>(null);
 
   const [rulesOpen, setRulesOpen] = useState(false);
   const [viewMode, setViewMode] = useState<"list" | "calendar">("list");
@@ -165,16 +157,67 @@ export default function MemberInputPage() {
     };
   }, []);
 
-  const caps = DEFAULT_PREFERENCE_MONTHLY_CAPS;
+  useEffect(() => {
+    saveMemberPreferencesToStorage(prefsByMember);
+  }, [prefsByMember]);
+
+  useEffect(() => {
+    const sync = () => setApplicationsTick((t) => t + 1);
+    window.addEventListener(PREFERENCE_APPLICATIONS_UPDATED_EVENT, sync);
+    window.addEventListener("focus", sync);
+    return () => {
+      window.removeEventListener(PREFERENCE_APPLICATIONS_UPDATED_EVENT, sync);
+      window.removeEventListener("focus", sync);
+    };
+  }, []);
+
+  const yearMonth = yearMonthFromParts(year, month0);
 
   const flagsByDate = selectedMember ? prefsByMember[selectedMember] : {};
-  const { baseMarks, nightMarks } = useMemo(
-    () => countMonthlyUsage(flagsByDate, year, month0),
+  const restCrossMarks = useMemo(
+    () => countRestCrossMarks(flagsByDate, year, month0),
+    [flagsByDate, year, month0],
+  );
+  const halfDayMarks = useMemo(
+    () => countHalfDayMarks(flagsByDate, year, month0),
+    [flagsByDate, year, month0],
+  );
+  const nightMarks = useMemo(
+    () => countNightMarks(flagsByDate, year, month0),
     [flagsByDate, year, month0],
   );
 
-  const baseOver = baseMarks > caps.maxBasePreferenceMarksPerMonth;
-  const nightOver = nightMarks > caps.maxNightUnavailableMarksPerMonth;
+  const monthApplications = useMemo(() => {
+    if (!selectedMember) return [];
+    void applicationsTick;
+    return listApplicationsForMemberMonth(
+      loadPreferenceApplicationsFromStorage(),
+      selectedMember,
+      yearMonth,
+    );
+  }, [selectedMember, yearMonth, applicationsTick]);
+
+  const approvedExtraRestCross = useMemo(
+    () =>
+      monthApplications
+        .filter((a) => a.status === "approved")
+        .reduce((s, a) => s + a.approvedExtraRestCross, 0),
+    [monthApplications],
+  );
+  const approvedExtraNight = useMemo(
+    () =>
+      monthApplications
+        .filter((a) => a.status === "approved")
+        .reduce((s, a) => s + a.approvedExtraNight, 0),
+    [monthApplications],
+  );
+
+  const effectiveCaps = useMemo(
+    () => getEffectivePreferenceCaps(monthApplications),
+    [monthApplications],
+  );
+
+  const halfDayOver = halfDayMarks > effectiveCaps.halfDay;
 
   const monthDates = useMemo(() => listDatesInMonth(year, month0), [year, month0]);
 
@@ -199,7 +242,7 @@ export default function MemberInputPage() {
       if (!selectedMember) return;
       setPrefsByMember((prev) => {
         const memberMap = { ...prev[selectedMember] };
-        const cur = { ...(memberMap[date] ?? emptyFlags()), ...patch };
+        const cur = { ...(memberMap[date] ?? emptyPreferenceFlags()), ...patch };
         if (
           !cur.fullDayOff &&
           !cur.fullyUnavailable &&
@@ -246,13 +289,26 @@ export default function MemberInputPage() {
     return f;
   }
 
-  function toggleFlag(
-    date: ISODateString,
-    key: keyof MemberDayPreferenceFlags,
-    checked: boolean,
-  ) {
-    const cur = { ...(flagsByDate[date] ?? emptyFlags()), [key]: checked };
+  function toggleFlag(date: ISODateString, key: PreferenceToggleKey, checked: boolean) {
+    setCapBlockMessage(null);
+    const cur = { ...(flagsByDate[date] ?? emptyPreferenceFlags()), [key]: checked };
     const merged = applyExclusiveRules(date, cur);
+    if (checked && wouldExceedPreferenceCap(key, flagsByDate, year, month0, date, merged, effectiveCaps)) {
+      if (key === "fullDayOff" || key === "fullyUnavailable") {
+        setCapBlockMessage(
+          `休・✖ は ${effectiveCaps.restCross} 件までです。超える場合は部長へ申請し、承認後に入力してください。`,
+        );
+      } else if (key === "morningHalfOff" || key === "afternoonHalfOff") {
+        setCapBlockMessage(
+          `午前・午後半休は ${effectiveCaps.halfDay} 件までです（申請の対象外）。`,
+        );
+      } else {
+        setCapBlockMessage(
+          `夜✖ は ${effectiveCaps.night} 件までです。超える場合は部長へ申請し、承認後に入力してください。`,
+        );
+      }
+      return;
+    }
     setFlag(date, merged);
   }
 
@@ -341,7 +397,7 @@ export default function MemberInputPage() {
           <>
             <Section
               title={`希望入力（${monthTitle()}・${selectedMember}）`}
-              description="各日について「休」「✖️」「午前半休」「午後半休」「夜✖️」から該当するものにチェックを入れます。休・✖️は他の全日系・半休と同時には選べず、その日の当番（早番・遅番・メイン・予備・国会など）には原則入りません。夜✖️は遅番と休日の出勤（土日祝のメイン枠）には入りませんが、早番には入る場合があります。休日の予備は原則避けますが、他に配置できる人がいない場合のみ割り当て得ます。平日で国会当番に指定されている日は行の色と「注意」欄でお知らせします。"
+              description="各日について「休」「✖️」「午前半休」「午後半休」「夜✖️」から該当するものにチェックを入れます。休・✖️は他の全日系・半休と同時には選べず、その日の当番（早番・遅番・メイン・予備・国会など）には原則入りません。夜✖️は遅番と休日の出勤（土日祝のメイン枠）には入りませんが、早番には入る場合があります。休日の予備は原則避けますが、他に配置できる人がいない場合のみ割り当て得ます。日曜・祝日のメイン出勤の翌日は早番を原則避けますが、人手が足りない場合のみ早番になることがあります。土曜・日曜・祝日の出勤は休日の連続出勤を原則避けますが、人手が足りない場合のみ連続になることがあります。平日で国会当番に指定されている日は行の色と「注意」欄でお知らせします。"
             >
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
@@ -384,25 +440,42 @@ export default function MemberInputPage() {
               <div className="rounded-xl border border-neutral-200 p-4 dark:border-neutral-800">
                 <div className="flex flex-wrap gap-4 text-sm">
                   <p className="text-neutral-700 dark:text-neutral-300">
-                    基本グループ（休・✖️・午前半休・午後半休）の合算:{" "}
-                    <span className="font-semibold tabular-nums">{baseMarks}</span> /{" "}
-                    {caps.maxBasePreferenceMarksPerMonth}
+                    休・✖:{" "}
+                    <span className="font-semibold tabular-nums">{restCrossMarks}</span> /{" "}
+                    {effectiveCaps.restCross}
+                    {approvedExtraRestCross > 0 ? `（+${approvedExtraRestCross} 承認）` : ""}
+                  </p>
+                  <p className="text-neutral-700 dark:text-neutral-300">
+                    午前・午後半休:{" "}
+                    <span className="font-semibold tabular-nums">{halfDayMarks}</span> /{" "}
+                    {DEFAULT_HALF_DAY_MARKS_PER_MONTH}
                   </p>
                   <p className="text-neutral-700 dark:text-neutral-300">
                     夜✖️:{" "}
                     <span className="font-semibold tabular-nums">{nightMarks}</span> /{" "}
-                    {caps.maxNightUnavailableMarksPerMonth}
+                    {effectiveCaps.night}
+                    {approvedExtraNight > 0 ? `（+${approvedExtraNight} 承認）` : ""}
                   </p>
                 </div>
-                {baseOver ? (
-                  <p className="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-100">
-                    基本グループの上限を超えています。<strong>部長へ申請してください。</strong>
+                {capBlockMessage ? (
+                  <p className="mt-3 rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-950 dark:border-red-800 dark:bg-red-950/50 dark:text-red-100">
+                    {capBlockMessage}
                   </p>
                 ) : null}
-                {nightOver ? (
+                {halfDayOver ? (
                   <p className="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-100">
-                    「夜✖️」の上限を超えています。<strong>部長へ申請してください。</strong>
+                    午前・午後半休は月 {DEFAULT_HALF_DAY_MARKS_PER_MONTH} 件までです。超過分はチェックを外してください。
                   </p>
+                ) : null}
+                {selectedMember ? (
+                  <PreferenceLimitApplicationPanel
+                    dutyMember={selectedMember}
+                    yearMonth={yearMonth}
+                    restCrossMarks={restCrossMarks}
+                    nightMarks={nightMarks}
+                    applications={monthApplications}
+                    onSubmitted={() => setApplicationsTick((t) => t + 1)}
+                  />
                 ) : null}
               </div>
 
@@ -422,7 +495,7 @@ export default function MemberInputPage() {
                     {monthDates.map((date) => {
                       const d = Number(date.slice(8, 10));
                       const f = flagsByDate[date];
-                      const congested = isHighCongestionRisk(date, f ?? emptyFlags());
+                      const congested = isHighCongestionRisk(date, f ?? emptyPreferenceFlags());
                       const dots = summaryDots(f);
                       const congressLabels =
                         selectedMember !== null
@@ -497,7 +570,7 @@ export default function MemberInputPage() {
                     </thead>
                     <tbody>
                       {monthDates.map((date) => {
-                        const f = flagsByDate[date] ?? emptyFlags();
+                        const f = flagsByDate[date] ?? emptyPreferenceFlags();
                         const wd = new Date(date + "T12:00:00").getDay();
                         const congested = isHighCongestionRisk(date, f);
                         const congressLabels = getMemberCongressDutyLabels(

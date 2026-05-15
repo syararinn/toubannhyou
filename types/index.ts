@@ -143,6 +143,8 @@ export interface AdminSettings {
  * - 「夜✖️」: 遅番と休日出勤（土日祝のメイン枠）のみハード不可。早番は可。休日の予備はハード可だが、日曜・祝日の予備は夜✖️の人を他に候補がいる限り避ける（生成ロジック）。
  * - 国会月番・国会週番の指名者: その月／その週ブロックの平日は早番・遅番と兼務しない（国会枠または国会（応援）のみ）。
  * - 磯田のグラフ専任期間中: 磯田は全日の当番枠から除外（早番・遅番・メイン・予備・国会含む）。
+ * - 日曜・祝日のメイン出勤の翌日: その部員への早番は原則つけない。他に配置可能な候補がいない場合は割り当て可（生成ロジック）。
+ * - 休日（土曜・日曜・祝日）の出勤: 同一部員の休日連続出勤は原則避ける。他に配置可能な候補がいない場合は割り当て可（生成ロジック）。
  */
 export interface MemberDayPreferenceFlags {
   /** 休 */
@@ -157,7 +159,10 @@ export interface MemberDayPreferenceFlags {
   nightUnavailable: boolean;
 }
 
-/** 月次の希望上限制御（基本グループ合算 原則 3、夜✖️は独立して 3） */
+/**
+ * 月次の希望上限制御（休・✖ 合算 原則 3、午前・午後半休 原則 3、夜✖️ 原則 3）。
+ * 超過時は部員が月あたり最大5回まで申請でき、部長が休・✖／夜✖ それぞれ 0〜30 件の追加枠を別設定で承認する（承認分は同月内で加算）。
+ */
 export interface PreferenceMonthlyCaps {
   maxBasePreferenceMarksPerMonth: number;
   maxNightUnavailableMarksPerMonth: number;
@@ -168,6 +173,44 @@ export const DEFAULT_PREFERENCE_MONTHLY_CAPS: PreferenceMonthlyCaps = {
   maxBasePreferenceMarksPerMonth: 3,
   maxNightUnavailableMarksPerMonth: 3,
 };
+
+/** 午前・午後半休の月次上限（申請・承認の対象外。超過時は入力不可） */
+export const DEFAULT_HALF_DAY_MARKS_PER_MONTH = 3;
+
+/** 部長承認で追加できる休・✖ の上限件数（1ヶ月あたり） */
+export const MAX_APPROVED_EXTRA_REST_CROSS_MARKS = 30;
+
+/** 部長承認で追加できる夜✖ の上限件数（1ヶ月あたり） */
+export const MAX_APPROVED_EXTRA_NIGHT_MARKS = 30;
+
+export type PreferenceLimitApplicationStatus = "pending" | "approved" | "rejected";
+
+/** 部員あたり・月あたりの申請回数上限 */
+export const MAX_PREFERENCE_LIMIT_APPLICATIONS_PER_MONTH = 5;
+
+/**
+ * 希望上限の超過申請（部員あたり・月あたり最大5件）。
+ * 翌月は承認加算分をリセットし、既定の3件から再カウントする。
+ */
+export interface PreferenceLimitApplication {
+  /** 申請ごとの一意ID */
+  id: string;
+  dutyMember: DutyMember;
+  yearMonth: YearMonthString;
+  status: PreferenceLimitApplicationStatus;
+  submittedAt: string;
+  /** 休・✖ 超過時の理由（該当しなければ空） */
+  restCrossReason: string;
+  /** 夜✖ 超過時の理由（該当しなければ空） */
+  nightReason: string;
+  restCrossMarksAtSubmit: number;
+  nightMarksAtSubmit: number;
+  /** 承認後: 既定3に加算する休・✖ 枠（0〜30） */
+  approvedExtraRestCross: number;
+  /** 承認後: 既定3に加算する夜✖ 枠（0〜30） */
+  approvedExtraNight: number;
+  reviewedAt?: string;
+}
 
 export interface MemberPreferenceDayEntry {
   date: ISODateString;
