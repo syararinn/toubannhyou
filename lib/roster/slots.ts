@@ -154,14 +154,15 @@ export function buildDemandSlotsForDate(
   const slots: DemandSlot[] = [];
   const ov = findOverride(admin, date);
   const hol = holidayNameOn(date, holidayExtra);
-  const isHol = Boolean(hol);
+  const isNationalHolidayOrSubstitute = Boolean(hol);
 
   /** 休刊作業日は自動当番（メイン／予備等）を出さない。出勤は管理者指定の 1 名のみ。 */
   if (isNewspaperNonPublicationDay(admin, date)) {
     return [];
   }
 
-  if (isSunday(date) || isHol) {
+  /** 日曜、または国民の祝日・振替休日等（祝日法による休日）は日曜と同様メイン＋予備。国会枠は付けない。 */
+  if (isSunday(date) || isNationalHolidayOrSubstitute) {
     const mainN = ov?.weekendHolidaySlots?.sundayOrHolidayMain ?? 1;
     const resN = ov?.weekendHolidaySlots?.sundayOrHolidayReserve ?? 1;
 
@@ -174,7 +175,8 @@ export function buildDemandSlotsForDate(
     return slots;
   }
 
-  if (isWeekdayMonFri(date)) {
+  /** 月〜金のうち、祝日・振替休日でない日だけ早番・遅番・国会枠を付ける。 */
+  if (isWeekdayMonFri(date) && !isNationalHolidayOrSubstitute) {
     const earlyN = ov?.weekdaySlots?.early ?? 1;
     const lateN = ov?.weekdaySlots?.late ?? 1;
     const monthly = lookupCongressMonthly(admin, date);

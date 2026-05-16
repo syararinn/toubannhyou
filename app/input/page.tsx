@@ -40,6 +40,7 @@ import {
   type PreferenceToggleKey,
 } from "@/lib/preferenceLimits";
 import { getMemberCongressDutyLabels } from "@/lib/roster/congress-member-notice";
+import { buildHolidayLookupMap } from "@/lib/roster/holidays";
 import { DEFAULT_HALF_DAY_MARKS_PER_MONTH } from "@/types";
 
 const DUTY_MEMBERS = ROSTER_COLUMN_ORDER.filter(
@@ -123,7 +124,7 @@ const AI_RULES_PUBLIC_TEXT = [
   "毎週（月曜始まり）、当番の回数が可能な限り均等になるよう調整します（国会当番・グラフ専任・出向者は対象外）。",
   "AIとして要件定義に基づき極限まで均等化を目指し計算し直します。",
   "ご入力いただいた希望は可能な範囲で尊重しますが、全体の制約を満たす必要があるため、すべてが通るとは限りません。",
-  "「休」「✖️」はその日の当番を希望しないものです。「夜✖️」は遅番と休日の出勤（土日祝のメイン枠）を希望しないものです。早番は可で、休日の予備は原則避けますが、どうしても人手が足りないときのみ割り当て得ます。",
+  "「休」「✖️」はその日の当番を希望しないものです。「夜✖️」は遅番と休日の出勤（土曜のメイン、日曜・国民の祝日・振替休日などのメイン枠）を希望しないものです。早番は可で、休日の予備は原則避けますが、どうしても人手が足りないときのみ割り当て得ます。",
   "原則として、遅番の翌日は早番には入りません。他に配置できる人がいない場合のみ早番になることがあります。",
   "日曜・祝日にメイン出勤した方の翌日は、原則として早番には入りません。他に配置できる人がいない場合のみ早番になることがあります。",
   "土曜・日曜・祝日の出勤は、原則として休日の連続出勤にはしません。他に配置できる人がいない場合のみ、休日が続いても出勤になることがあります。",
@@ -162,6 +163,11 @@ export default function MemberInputPage() {
       window.removeEventListener("focus", sync);
     };
   }, []);
+
+  const holidayLookupMap = useMemo(
+    () => buildHolidayLookupMap(adminSnapshot),
+    [adminSnapshot],
+  );
 
   useEffect(() => {
     saveMemberPreferencesToStorage(prefsByMember);
@@ -512,7 +518,12 @@ export default function MemberInputPage() {
                       const dots = summaryDots(f);
                       const congressLabels =
                         selectedMember !== null
-                          ? getMemberCongressDutyLabels(adminSnapshot, date, selectedMember)
+                          ? getMemberCongressDutyLabels(
+                              adminSnapshot,
+                              date,
+                              selectedMember,
+                              holidayLookupMap,
+                            )
                           : [];
                       const congressDay = congressLabels.length > 0;
                       return (
@@ -521,7 +532,7 @@ export default function MemberInputPage() {
                           title={date}
                           className={`flex aspect-square flex-col items-center justify-center rounded-lg border text-xs transition ${
                             congressDay
-                              ? "border-amber-400 bg-amber-100/90 dark:border-amber-700 dark:bg-amber-950/50"
+                              ? "border-neutral-300 bg-neutral-200/75 text-neutral-600 dark:border-neutral-600 dark:bg-neutral-800/80 dark:text-neutral-400"
                               : congested
                                 ? "border-red-300 bg-red-50/80 dark:border-red-900/60 dark:bg-red-950/30"
                                 : "border-neutral-200 bg-neutral-50 dark:border-neutral-800 dark:bg-neutral-900/60"
@@ -531,7 +542,7 @@ export default function MemberInputPage() {
                             {d}
                           </span>
                           {congressDay ? (
-                            <span className="mt-0.5 max-w-full truncate px-0.5 text-[9px] font-medium text-amber-900 dark:text-amber-200">
+                            <span className="mt-0.5 max-w-full truncate px-0.5 text-[9px] font-medium text-neutral-600 dark:text-neutral-400">
                               国会
                             </span>
                           ) : null}
@@ -590,15 +601,16 @@ export default function MemberInputPage() {
                           adminSnapshot,
                           date,
                           selectedMember!,
+                          holidayLookupMap,
                         );
                         const congressDay = congressLabels.length > 0;
                         return (
                           <tr
                             key={date}
-                            className={`border-b border-neutral-100 odd:bg-white even:bg-neutral-50/80 dark:border-neutral-800/80 dark:odd:bg-neutral-950 dark:even:bg-neutral-900/40 ${
+                            className={`border-b border-neutral-100 dark:border-neutral-800/80 ${
                               congressDay
-                                ? "border-l-4 border-l-amber-500 bg-amber-50/70 dark:bg-amber-950/25"
-                                : ""
+                                ? "border-l-4 border-l-neutral-300 bg-neutral-100/95 dark:border-l-neutral-600 dark:bg-neutral-800/55"
+                                : "odd:bg-white even:bg-neutral-50/80 dark:odd:bg-neutral-950 dark:even:bg-neutral-900/40"
                             }`}
                           >
                             <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-neutral-800 dark:text-neutral-200">
@@ -621,7 +633,11 @@ export default function MemberInputPage() {
                               <td key={key} className="px-2 py-2 text-center align-middle">
                                 <input
                                   type="checkbox"
-                                  className="h-4 w-4 rounded border-neutral-300 disabled:cursor-not-allowed disabled:opacity-40 dark:border-neutral-600"
+                                  className={`h-4 w-4 rounded border-neutral-300 disabled:cursor-not-allowed disabled:opacity-40 dark:border-neutral-600 ${
+                                    congressDay
+                                      ? "opacity-50 transition-opacity hover:opacity-100 focus-visible:opacity-100"
+                                      : ""
+                                  }`}
                                   checked={checked}
                                   disabled={disabled}
                                   title={
@@ -643,7 +659,7 @@ export default function MemberInputPage() {
                                 {congressLabels.map((line) => (
                                   <div
                                     key={line}
-                                    className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-amber-950 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-100"
+                                    className="rounded-md border border-neutral-200 bg-neutral-100/90 px-2 py-1 text-neutral-700 dark:border-neutral-600 dark:bg-neutral-800/80 dark:text-neutral-300"
                                   >
                                     {line}
                                   </div>

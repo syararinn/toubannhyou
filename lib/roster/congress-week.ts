@@ -3,8 +3,10 @@ import { parseISODate } from "./dates";
 
 /**
  * その日が属する「月内の第何週」か（月曜始まりの週ブロック）。
- * - その月の最初の月曜より前の平日は第1週にまとめる（月初と同一週当番が担当）。
- * - 各ブロックは「月曜〜次の月曜の前日」まで（暦上の週と整合）。
+ * - **第1週**: その月の最初の月曜より前の日のみ（月初が月曜の月は第1週に該当する日はない）。
+ * - **第2週以降**: 最初の月曜から次の月曜の前日までを第2週、以降も各月曜ブロックで番号が増える。
+ *
+ * 国会週当番の UI「第N週」と一致させるため、月初の「月曜前」と「最初の月曜からの1週目」を同一番号にしない。
  */
 export function mondayBasedWeekIndexInMonth(iso: ISODateString): 1 | 2 | 3 | 4 | 5 | 6 {
   const { y, m, d } = parseISODate(iso);
@@ -18,16 +20,17 @@ export function mondayBasedWeekIndexInMonth(iso: ISODateString): 1 | 2 | 3 | 4 |
   if (mondayDomesticDays.length === 0) {
     return 1;
   }
-  const firstMonday = mondayDomesticDays[0];
+  const firstMonday = mondayDomesticDays[0]!;
   if (d < firstMonday) {
     return 1;
   }
+  const hasLeadingBeforeMonday = firstMonday > 1;
   for (let i = 0; i < mondayDomesticDays.length; i++) {
-    const start = mondayDomesticDays[i];
+    const start = mondayDomesticDays[i]!;
     const end =
       i + 1 < mondayDomesticDays.length ? mondayDomesticDays[i + 1]! - 1 : lastDay;
     if (d >= start && d <= end) {
-      const w = i + 1;
+      const w = (hasLeadingBeforeMonday ? 2 : 1) + i;
       return Math.min(6, w) as 1 | 2 | 3 | 4 | 5 | 6;
     }
   }

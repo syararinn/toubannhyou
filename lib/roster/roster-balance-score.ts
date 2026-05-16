@@ -24,6 +24,49 @@ function cellIncludesKind(cell: string, kind: "早番" | "遅番"): boolean {
   return cell.includes("遅番");
 }
 
+function spreadScore(counts: Record<DutyMember, number>, members: DutyMember[]): number {
+  if (members.length < 2) return 0;
+  let min = Infinity;
+  let max = -Infinity;
+  for (const m of members) {
+    const c = counts[m] ?? 0;
+    if (c < min) min = c;
+    if (c > max) max = c;
+  }
+  const diff = max - min;
+  return diff * diff * 10 + diff * 5;
+}
+
+/**
+ * 期間全体で、部員ごとの「早番回数＋遅番回数」の偏り（国会はセルに早/遅として含まれない）。
+ */
+export function scoreMonthlyEarlyLateCombinedSpread(days: GeneratedRosterDay[]): number {
+  const periodEarly = {} as Record<DutyMember, number>;
+  const periodLate = {} as Record<DutyMember, number>;
+  for (const m of DUTY_MEMBERS) {
+    periodEarly[m] = 0;
+    periodLate[m] = 0;
+  }
+
+  for (const day of days) {
+    for (const m of DUTY_MEMBERS) {
+      const cell = day.rosterCellsByColumnPerson[m as keyof typeof day.rosterCellsByColumnPerson] ?? "";
+      if (cellIncludesKind(cell, "早番")) {
+        periodEarly[m] += 1;
+      }
+      if (cellIncludesKind(cell, "遅番")) {
+        periodLate[m] += 1;
+      }
+    }
+  }
+
+  const combined = {} as Record<DutyMember, number>;
+  for (const m of DUTY_MEMBERS) {
+    combined[m] = (periodEarly[m] ?? 0) + (periodLate[m] ?? 0);
+  }
+  return spreadScore(combined, DUTY_MEMBERS);
+}
+
 /** 週次・期間の早番／遅番偏りと未充足枠からスコア（小さいほど均等） */
 export function scoreRosterEarlyLateBalance(
   days: GeneratedRosterDay[],
@@ -86,37 +129,14 @@ export function scoreRosterEarlyLateBalance(
 
   let score = 0;
 
-  const spread = (counts: Record<DutyMember, number>, members: DutyMember[]) => {
-    if (members.length < 2) return 0;
-    let min = Infinity;
-    let max = -Infinity;
-    for (const m of members) {
-      const c = counts[m] ?? 0;
-      if (c < min) min = c;
-      if (c > max) max = c;
-    }
-    const diff = max - min;
-    return diff * diff * 10 + diff * 5;
-  };
-
   for (const { early, late } of weeklyByKey.values()) {
-    score += spread(early, DUTY_MEMBERS);
-    score += spread(late, DUTY_MEMBERS);
+    score += spreadScore(early, DUTY_MEMBERS);
+    score += spreadScore(late, DUTY_MEMBERS);
   }
 
-  score += spread(periodEarly, DUTY_MEMBERS);
-  score += spread(periodLate, DUTY_MEMBERS);
+  score += spreadScore(periodEarly, DUTY_MEMBERS);
+  score += spreadScore(periodLate, DUTY_MEMBERS);
   score += unfilled.length * 1000;
 
   return score;
-}
-
-export function tieBreakOrderForAttempt(attempt: number): DutyMember[] {
-  let seed = (attempt + 1) * 0x9e3779b9;
-  const next = () => {
-    seed = Math.imul(seed ^ (seed >>> 15), 0x85ebca6b);
-    seed = Math.imul(seed ^ (seed >>> 13), 0xc2b2ae35);
-    return ((seed ^= seed >>> 16) >>> 0) / 4294967296;
-  };
-  return [...DUTY_MEMBERS].sort(() => next() - 0.5);
 }
