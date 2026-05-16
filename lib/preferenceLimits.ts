@@ -224,6 +224,58 @@ export function countNightMarksForFlags(
 
 export type PreferenceToggleKey = keyof MemberDayPreferenceFlags;
 
+/**
+ * 同日に選べない組み合わせ（午前半休×午後半休、午前半休×夜✖）。
+ * チェック ON 時に既存フラグと競合する場合はメッセージを返す。
+ */
+export function preferenceToggleBlockedBySameDayConflict(
+  flags: MemberDayPreferenceFlags,
+  key: PreferenceToggleKey,
+  checking: boolean,
+): string | null {
+  if (!checking) return null;
+  if (key === "morningHalfOff") {
+    if (flags.afternoonHalfOff) return "午前半休と午後半休は同日に選べません。";
+    if (flags.nightUnavailable) return "午前半休と夜✖は同日に選べません。";
+  }
+  if (key === "afternoonHalfOff" && flags.morningHalfOff) {
+    return "午前半休と午後半休は同日に選べません。";
+  }
+  if (key === "nightUnavailable" && flags.morningHalfOff) {
+    return "午前半休と夜✖は同日に選べません。";
+  }
+  return null;
+}
+
+/** 競合する別フラグが既に ON のとき、追加チェック用の入力を無効化する */
+export function isPreferenceToggleDisabled(
+  flags: MemberDayPreferenceFlags,
+  key: PreferenceToggleKey,
+): boolean {
+  if (key === "morningHalfOff" && !flags.morningHalfOff) {
+    return flags.afternoonHalfOff || flags.nightUnavailable;
+  }
+  if (key === "afternoonHalfOff" && !flags.afternoonHalfOff) {
+    return flags.morningHalfOff;
+  }
+  if (key === "nightUnavailable" && !flags.nightUnavailable) {
+    return flags.morningHalfOff;
+  }
+  return false;
+}
+
+/** 保存データなどで矛盾があれば午前半休を優先して他を落とす */
+export function sanitizeSameDayPreferenceFlags(
+  flags: MemberDayPreferenceFlags,
+): MemberDayPreferenceFlags {
+  const f = { ...flags };
+  if (f.morningHalfOff) {
+    if (f.afternoonHalfOff) f.afternoonHalfOff = false;
+    if (f.nightUnavailable) f.nightUnavailable = false;
+  }
+  return f;
+}
+
 export function wouldExceedPreferenceCap(
   key: PreferenceToggleKey,
   flagsByDate: Record<ISODateString, MemberDayPreferenceFlags>,

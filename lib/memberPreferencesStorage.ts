@@ -1,6 +1,12 @@
-import type { DutyMember, ISODateString, MemberDayPreferenceFlags } from "@/types";
+import type {
+  AdminSettings,
+  DutyMember,
+  ISODateString,
+  MemberDayPreferenceFlags,
+  MemberPreferenceInput,
+} from "@/types";
 import { ROSTER_COLUMN_ORDER } from "@/types";
-import { emptyPreferenceFlags } from "@/lib/preferenceLimits";
+import { emptyPreferenceFlags, sanitizeSameDayPreferenceFlags } from "@/lib/preferenceLimits";
 
 export const MEMBER_PREFERENCES_STORAGE_KEY = "duty-roster-member-preferences-v1";
 
@@ -49,7 +55,7 @@ export function loadMemberPreferencesFromStorage(): MemberPreferencesStore {
       for (const [date, flagsRaw] of Object.entries(memberRaw)) {
         const flags = mergeFlags(flagsRaw);
         if (flags && Object.values(flags).some(Boolean)) {
-          base[m][date as ISODateString] = flags;
+          base[m][date as ISODateString] = sanitizeSameDayPreferenceFlags(flags);
         }
       }
     }
@@ -67,4 +73,82 @@ export function saveMemberPreferencesToStorage(store: MemberPreferencesStore): v
   } catch {
     /* ignore */
   }
+}
+
+function pad2(n: number): string {
+  return n < 10 ? `0${n}` : String(n);
+}
+
+function lastDayOfMonth(yearMonth: string): number {
+  const [y, m] = yearMonth.split("-").map(Number);
+  return new Date(y, m, 0).getDate();
+}
+
+function monthStart(yearMonth: string): ISODateString {
+  return `${yearMonth}-01`;
+}
+
+function monthEnd(yearMonth: string): ISODateString {
+  const last = lastDayOfMonth(yearMonth);
+  return `${yearMonth}-${pad2(last)}`;
+}
+
+/** 当番生成 API 向けにストアを変換 */
+export function memberPreferencesStoreToGenerateInput(
+  store: MemberPreferencesStore,
+): Partial<Record<DutyMember, MemberPreferenceInput>> {
+  const out: Partial<Record<DutyMember, MemberPreferenceInput>> = {};
+  for (const m of DUTY_MEMBERS) {
+    const entries = Object.entries(store[m])
+      .filter(([, flags]) => Object.values(flags).some(Boolean))
+      .map(([date, flags]) => ({
+        date: date as ISODateString,
+        flags,
+      }));
+    if (entries.length > 0) {
+      out[m] = { dutyMember: m, entries };
+    }
+  }
+  return out;
+}
+
+/** 希望・管理者設定から生成期間（該当月の初日〜末日）を推定 */
+export function computeRosterRangeFromSavedData(
+  store: MemberPreferencesStore,
+  admin: AdminSettings,
+): { start: ISODateString; end: ISODateString; yearMonths: string[] } | null {
+  const yearMonths = new Set<string>();
+
+  for (const m of DUTY_MEMBERS) {
+    for (const date of Object.keys(store[m])) {
+      yearMonths.add(date.slice(0, 7));
+    }
+  }
+  for (const p of admin.dietSessions) {
+    yearMonths.add(p.start.slice(0, 7));
+    yearMonths.add(p.end.slice(0, 7));
+  }
+  for (const a of admin.congressMonthlyAssignments) {
+    yearMonths.add(a.yearMonth);
+  }
+  for (const a of admin.congressWeeklyAssignments) {
+    yearMonths.add(a.yearMonth);
+  }
+
+  if (yearMonths.size === 0) return null;
+
+  const sorted = [...yearMonths].sort();
+  return {
+    yearMonths: sorted,
+    start: monthStart(sorted[0]!),
+    end: monthEnd(sorted[sorted.length - 1]!),
+  };
+}
+
+export function countStoredPreferenceDays(store: MemberPreferencesStore): number {
+  let n = 0;
+  for (const m of DUTY_MEMBERS) {
+    n += Object.keys(store[m]).length;
+  }
+  return n;
 }

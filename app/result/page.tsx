@@ -1,11 +1,60 @@
 "use client";
 
-import { Fragment, useCallback, useMemo, useState, type ReactNode } from "react";
-import type { GeneratedRosterDay, RosterColumnPerson } from "@/types";
+import Link from "next/link";
+import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import type { GeneratedRosterDay, ISODateString, RosterColumnPerson } from "@/types";
 import { ROSTER_COLUMN_ORDER } from "@/types";
+import {
+  ADMIN_SETTINGS_UPDATED_EVENT,
+  loadAdminSettingsFromStorage,
+} from "@/lib/adminSettingsStorage";
+import {
+  computeRosterRangeFromSavedData,
+  countStoredPreferenceDays,
+  loadMemberPreferencesFromStorage,
+  memberPreferencesStoreToGenerateInput,
+  MEMBER_PREFERENCES_UPDATED_EVENT,
+} from "@/lib/memberPreferencesStorage";
 import { csvWithUtf8Bom, rosterDaysToCsv } from "@/lib/roster/csv";
 import { DEMO_ROSTER_RANGE, demoAdminSettings, demoPreferencesByMember } from "@/lib/roster/demo";
+import { compareIso } from "@/lib/roster/dates";
 import { generateRoster, type UnfilledSlot } from "@/lib/roster/generate";
+import { formatRosterDutyCellText } from "@/lib/roster/roster-cell-display";
+
+function pad2(n: number): string {
+  return n < 10 ? `0${n}` : String(n);
+}
+
+function calendarMonthRange(year: number, month0: number): {
+  start: ISODateString;
+  end: ISODateString;
+} {
+  const last = new Date(year, month0 + 1, 0).getDate();
+  return {
+    start: `${year}-${pad2(month0 + 1)}-01`,
+    end: `${year}-${pad2(month0 + 1)}-${pad2(last)}`,
+  };
+}
+
+function defaultGenerateRange(): { start: ISODateString; end: ISODateString } {
+  const now = new Date();
+  const fromSaved = calendarMonthRange(now.getFullYear(), now.getMonth());
+  return fromSaved;
+}
+
+function validateGenerateRange(
+  start: string,
+  end: string,
+): string | null {
+  if (!start || !end) return "生成期間の開始日と終了日を指定してください。";
+  if (compareIso(start, end) > 0) {
+    return "開始日は終了日以前にしてください。";
+  }
+  return null;
+}
+
+const inputDateClass =
+  "rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm font-mono tabular-nums text-neutral-900 shadow-sm focus:border-neutral-500 focus:outline-none focus:ring-1 focus:ring-neutral-500 dark:border-neutral-600 dark:bg-neutral-900 dark:text-neutral-100";
 
 const btnPrimary =
   "inline-flex items-center justify-center rounded-lg bg-neutral-900 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-neutral-800 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-white";
@@ -45,14 +94,12 @@ function stickyCellBgClass(row: GeneratedRosterDay): string {
   return "bg-inherit";
 }
 
-/** 早番＝濃い青、遅番＝赤。日曜・祝日・振替休日の「メイン」表記は「出勤」に置換（画面表示のみ） */
+/** 早番＝濃い青、遅番＝赤 */
 function formatDutyCellText(raw: string, row: GeneratedRosterDay): ReactNode {
   if (!raw) return "";
-  const sunOrHol = isPastelPinkRestDayRow(row);
-  const parts = raw.split("・");
+  const parts = formatRosterDutyCellText(raw, row).split("・");
   return parts.map((segment, i) => {
-    const display =
-      sunOrHol && segment === "メイン" ? "出勤" : segment;
+    const display = segment;
     let segClass = "";
     if (segment === "早番") {
       segClass = "font-semibold text-blue-900 dark:text-blue-300";
@@ -60,8 +107,14 @@ function formatDutyCellText(raw: string, row: GeneratedRosterDay): ReactNode {
       segClass = "font-semibold text-red-600 dark:text-red-400";
     } else if (segment === "国会（応援）") {
       segClass = "font-medium text-violet-800 dark:text-violet-300";
-    } else if (segment === "国会月番" || segment === "国会週番") {
+    } else if (
+      segment === "国会当番" ||
+      segment === "国会月番" ||
+      segment === "国会週番"
+    ) {
       segClass = "font-medium text-neutral-800 dark:text-neutral-200";
+    } else if (segment === "グラフ") {
+      segClass = "font-medium text-teal-800 dark:text-teal-300";
     }
     return (
       <Fragment key={`${segment}-${i}`}>
@@ -124,17 +177,101 @@ function Section({
 export default function ResultPage() {
   const [days, setDays] = useState<GeneratedRosterDay[] | null>(null);
   const [unfilled, setUnfilled] = useState<UnfilledSlot[] | null>(null);
+  const [generatedRange, setGeneratedRange] = useState<{
+    start: ISODateString;
+    end: ISODateString;
+  } | null>(null);
+  const [generateError, setGenerateError] = useState<string | null>(null);
+  const [prefsSnapshot, setPrefsSnapshot] = useState(() =>
+    loadMemberPreferencesFromStorage(),
+  );
+  const [storageTick, setStorageTick] = useState(0);
+  const [rangeStart, setRangeStart] = useState<ISODateString>(() =>
+    defaultGenerateRange().start,
+  );
+  const [rangeEnd, setRangeEnd] = useState<ISODateString>(() =>
+    defaultGenerateRange().end,
+  );
 
-  const runDemo = useCallback(() => {
+  useEffect(() => {
+    const sync = () => {
+      setPrefsSnapshot(loadMemberPreferencesFromStorage());
+      setStorageTick((t) => t + 1);
+    };
+    sync();
+    window.addEventListener(MEMBER_PREFERENCES_UPDATED_EVENT, sync);
+    window.addEventListener(ADMIN_SETTINGS_UPDATED_EVENT, sync);
+    window.addEventListener("focus", sync);
+    return () => {
+      window.removeEventListener(MEMBER_PREFERENCES_UPDATED_EVENT, sync);
+      window.removeEventListener(ADMIN_SETTINGS_UPDATED_EVENT, sync);
+      window.removeEventListener("focus", sync);
+    };
+  }, []);
+
+  const savedRange = useMemo(() => {
+    void storageTick;
+    const admin = loadAdminSettingsFromStorage();
+    return computeRosterRangeFromSavedData(prefsSnapshot, admin);
+  }, [prefsSnapshot, storageTick]);
+
+  const preferenceDayCount = useMemo(
+    () => countStoredPreferenceDays(prefsSnapshot),
+    [prefsSnapshot],
+  );
+
+  const applySuggestedRange = useCallback(() => {
+    setGenerateError(null);
+    const admin = loadAdminSettingsFromStorage();
+    const prefs = loadMemberPreferencesFromStorage();
+    const range = computeRosterRangeFromSavedData(prefs, admin);
+    if (!range) {
+      setGenerateError(
+        "希望入力または管理者設定が未登録のため、期間を推定できません。日付を手入力するか、申請・管理者ページでデータを登録してください。",
+      );
+      return;
+    }
+    setRangeStart(range.start);
+    setRangeEnd(range.end);
+  }, []);
+
+  const runFromSaved = useCallback(() => {
+    setGenerateError(null);
+    const rangeError = validateGenerateRange(rangeStart, rangeEnd);
+    if (rangeError) {
+      setGenerateError(rangeError);
+      return;
+    }
+    const admin = loadAdminSettingsFromStorage();
+    const prefs = loadMemberPreferencesFromStorage();
     const { days: d, unfilled: u } = generateRoster({
-      admin: demoAdminSettings(),
-      rangeStart: DEMO_ROSTER_RANGE.start,
-      rangeEnd: DEMO_ROSTER_RANGE.end,
-      preferencesByMember: demoPreferencesByMember(),
+      admin,
+      rangeStart,
+      rangeEnd,
+      preferencesByMember: memberPreferencesStoreToGenerateInput(prefs),
     });
+    setGeneratedRange({ start: rangeStart, end: rangeEnd });
     setDays(d);
     setUnfilled(u);
-  }, []);
+  }, [rangeStart, rangeEnd]);
+
+  const runDemo = useCallback(() => {
+    setGenerateError(null);
+    const rangeError = validateGenerateRange(rangeStart, rangeEnd);
+    if (rangeError) {
+      setGenerateError(rangeError);
+      return;
+    }
+    const { days: d, unfilled: u } = generateRoster({
+      admin: demoAdminSettings(),
+      rangeStart,
+      rangeEnd,
+      preferencesByMember: demoPreferencesByMember(),
+    });
+    setGeneratedRange({ start: rangeStart, end: rangeEnd });
+    setDays(d);
+    setUnfilled(u);
+  }, [rangeStart, rangeEnd]);
 
   const csvBlob = useMemo(() => {
     if (!days?.length) return null;
@@ -145,14 +282,14 @@ export default function ResultPage() {
   }, [days]);
 
   const downloadCsv = useCallback(() => {
-    if (!csvBlob || !days?.length) return;
+    if (!csvBlob || !days?.length || !generatedRange) return;
     const url = URL.createObjectURL(csvBlob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `当番表_${DEMO_ROSTER_RANGE.start}_${DEMO_ROSTER_RANGE.end}.csv`;
+    a.download = `当番表_${generatedRange.start}_${generatedRange.end}.csv`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [csvBlob, days]);
+  }, [csvBlob, days, generatedRange]);
 
   return (
     <div className="min-h-screen bg-neutral-50 pb-16 dark:bg-neutral-950">
@@ -165,7 +302,11 @@ export default function ResultPage() {
             当番表（完成版プレビュー）
           </h1>
           <p className="max-w-2xl text-sm text-neutral-600 dark:text-neutral-400">
-            管理者設定・部員希望に基づき当番を割り当てた結果を表示します。本番では API や共有ストアから同じ入力を渡してください。勤務間インターバルや希望の制約、公平な回数配分のための内部調整を行っています。
+            管理者設定と、
+            <Link href="/input" className="font-medium text-neutral-900 underline dark:text-neutral-100">
+              希望申請ページ
+            </Link>
+            で入力した休み・夜×など（同じブラウザに自動保存）を反映して当番を割り当てます。当番の回数が可能な限り均等になるよう調整し、AIとして要件定義に基づき極限まで均等化を目指し計算し直します（努力目標）。勤務間インターバルや希望の制約を優先します。
           </p>
         </div>
       </header>
@@ -173,10 +314,88 @@ export default function ResultPage() {
       <main className="mx-auto flex max-w-6xl flex-col gap-8 px-4 py-10 sm:px-6">
         <Section
           title="生成"
-          description={`デモ用データ（${DEMO_ROSTER_RANGE.start}〜${DEMO_ROSTER_RANGE.end}）で生成します。`}
+          description="生成する期間（開始日〜終了日）を指定してから、当番表を作成してください。申請ページのチェックは入力のたびにこのブラウザへ保存されます。"
         >
+          <div className="rounded-xl border border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900/30">
+            <p className="text-sm font-medium text-neutral-800 dark:text-neutral-200">
+              生成期間
+            </p>
+            <div className="mt-3 flex flex-wrap items-end gap-4">
+              <label className="flex flex-col gap-1 text-sm text-neutral-600 dark:text-neutral-400">
+                開始日
+                <input
+                  type="date"
+                  className={inputDateClass}
+                  value={rangeStart}
+                  onChange={(e) => setRangeStart(e.target.value)}
+                />
+              </label>
+              <span className="pb-2 text-neutral-400">〜</span>
+              <label className="flex flex-col gap-1 text-sm text-neutral-600 dark:text-neutral-400">
+                終了日
+                <input
+                  type="date"
+                  className={inputDateClass}
+                  value={rangeEnd}
+                  min={rangeStart}
+                  onChange={(e) => setRangeEnd(e.target.value)}
+                />
+              </label>
+              <button
+                type="button"
+                className={btnSecondary}
+                onClick={applySuggestedRange}
+                disabled={!savedRange}
+              >
+                保存データから期間を反映
+              </button>
+            </div>
+            <p className="mt-2 text-xs text-neutral-500 dark:text-neutral-400">
+              指定した日付の範囲（両端を含む）で1日ずつ当番を割り当てます。
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-neutral-200 bg-neutral-50/80 px-4 py-3 text-sm text-neutral-700 dark:border-neutral-800 dark:bg-neutral-900/40 dark:text-neutral-300">
+            <p>
+              保存済み希望:{" "}
+              <span className="font-semibold tabular-nums">{preferenceDayCount}</span> 件（部員×日付）
+            </p>
+            {savedRange ? (
+              <p className="mt-1">
+                生成対象期間（推定）:{" "}
+                <span className="font-mono tabular-nums">
+                  {savedRange.start} 〜 {savedRange.end}
+                </span>
+                {savedRange.yearMonths.length > 1 ? (
+                  <span className="text-neutral-500">（複数月）</span>
+                ) : null}
+              </p>
+            ) : (
+              <p className="mt-1 text-amber-800 dark:text-amber-200">
+                希望または管理者設定が未登録です。
+                <Link href="/input" className="ml-1 underline">
+                  申請ページ
+                </Link>
+                または
+                <Link href="/admin" className="ml-1 underline">
+                  管理者ページ
+                </Link>
+                で入力してください。
+              </p>
+            )}
+          </div>
+
+          {generateError ? (
+            <p className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-100">
+              {generateError}
+            </p>
+          ) : null}
+
           <div className="flex flex-wrap gap-3">
-            <button type="button" className={btnPrimary} onClick={runDemo}>
+            <button type="button" className={btnPrimary} onClick={runFromSaved}>
+              保存済みの希望・管理者設定で当番表を生成
+            </button>
+            <button type="button" className={btnSecondary} onClick={runDemo}>
               デモデータで当番表を生成
             </button>
             <button
@@ -188,6 +407,15 @@ export default function ResultPage() {
               CSV をダウンロード
             </button>
           </div>
+          <p className="text-xs text-neutral-500 dark:text-neutral-400">
+            デモボタンは組み込みのサンプル希望のみを使います（申請ページの保存内容は使いません）。いずれも上記の生成期間で作成します。
+            {generatedRange ? (
+              <>
+                {" "}
+                直近の生成: {generatedRange.start}〜{generatedRange.end}
+              </>
+            ) : null}
+          </p>
         </Section>
 
         {unfilled && unfilled.length > 0 ? (
@@ -262,7 +490,7 @@ export default function ResultPage() {
           </Section>
         ) : (
           <p className="text-center text-sm text-neutral-500">
-            「デモデータで当番表を生成」を押すと表が表示されます。
+            「保存済みの希望・管理者設定で当番表を生成」を押すと、申請ページの入力が反映された表が表示されます。
           </p>
         )}
       </main>

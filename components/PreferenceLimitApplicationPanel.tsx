@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import type { DutyMember, PreferenceLimitApplication } from "@/types";
-import { MAX_PREFERENCE_LIMIT_APPLICATIONS_PER_MONTH } from "@/types";
 import {
   getEffectivePreferenceCaps,
   getPreferenceApplicationSubmitEligibility,
@@ -99,18 +98,10 @@ export function PreferenceLimitApplicationPanel({
 
   return (
     <div className="mt-3 space-y-3">
-      <p className="text-xs text-neutral-500">
-        今月の申請: {submitEligibility.usedCount} / {submitEligibility.maxCount} 回
-        {approvedCount > 0 ? `（承認済み ${approvedCount} 件）` : ""}
-      </p>
-
       {approvedCount > 0 && !pending ? (
         <p className="rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm text-emerald-950 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-100">
           <strong>承認反映中（{yearMonth}）。</strong> 休・✖ 上限 {caps.restCross} 件、夜✖ 上限{" "}
           {caps.night} 件まで入力できます。
-          {!need.restCross && !need.night && submitEligibility.allowed
-            ? ` 追加の相談はあと ${submitEligibility.maxCount - submitEligibility.usedCount} 回申請できます。`
-            : ""}
         </p>
       ) : null}
 
@@ -132,16 +123,14 @@ export function PreferenceLimitApplicationPanel({
       {(need.restCross || need.night) && !pending ? (
         <p className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-100">
           現在の上限（休・✖ {caps.restCross} 件・夜✖ {caps.night} 件）を超えています。
-          <strong>部長へ申請</strong>してください（月{" "}
-          {MAX_PREFERENCE_LIMIT_APPLICATIONS_PER_MONTH} 回まで）。
+          <strong>部長へ申請</strong>してください。
         </p>
       ) : null}
 
       {!pending && !showForm && submitEligibility.allowed ? (
         <div className="rounded-lg border border-dashed border-neutral-300 px-3 py-3 dark:border-neutral-700">
           <p className="text-sm text-neutral-600 dark:text-neutral-400">
-            育休などで事前に追加枠が必要な場合は、下のチェックで申請項目を表示できます（月{" "}
-            {MAX_PREFERENCE_LIMIT_APPLICATIONS_PER_MONTH} 回まで）。
+            育休などで事前に追加枠が必要な場合は、下のチェックで申請項目を表示できます。
           </p>
           <label className="mt-2 flex items-center gap-2 text-sm">
             <input
@@ -253,7 +242,6 @@ function ApplicationForm({
             rows={3}
             value={restCrossReason}
             onChange={(e) => setRestCrossReason(e.target.value)}
-            placeholder="例: 追加で休みが必要になった"
           />
         </div>
       ) : null}
@@ -267,7 +255,6 @@ function ApplicationForm({
             rows={3}
             value={nightReason}
             onChange={(e) => setNightReason(e.target.value)}
-            placeholder="例: 通院のため夜勤不可が続く"
           />
         </div>
       ) : null}

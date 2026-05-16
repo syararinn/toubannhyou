@@ -21,11 +21,14 @@ import {
   isMemberExcludedGlobally,
   preferencesToMap,
   type PreferenceMap,
+  hadLateShiftYesterday,
   violatesHardPreference,
   violatesInterval,
   violatesMorningHalfOnLateSlot,
 } from "./eligibility";
 import { holidayNameOn, JP_HOLIDAYS_2026 } from "./holidays";
+import { applyCongressNominationCellLabels } from "./congress-nomination-display";
+import { applyGraphExclusiveIsobeCellLabel } from "./graph-exclusive-display";
 import { formatPreferenceMarksForDay } from "./preference-marks";
 import {
   buildDemandSlotsForDate,
@@ -35,6 +38,25 @@ import {
   lookupCongressMonthly,
   lookupCongressWeekly,
 } from "./slots";
+import {
+  createEarlyLateDutyCounts,
+  recordEarlyLateDutyAssignment,
+} from "./early-late-duty-counts";
+import { compareForEarlyLateSlotAssignment } from "./early-late-assignment-compare";
+import { augmentPoolForEqualizationAssignment } from "./equalization-candidate-prefs";
+import {
+  scoreRosterEarlyLateBalance,
+  tieBreakOrderForAttempt,
+} from "./roster-balance-score";
+import {
+  createWeeklyEarlyLateCounts,
+  isExcludedFromWeeklyEarlyLateBalance,
+  preferMinimumPeriodEarlyLateInPool,
+  preferMinimumWeeklyEarlyLateInPool,
+  recordWeeklyEarlyLateAssignment,
+  resetWeeklyEarlyLateCountsIfNewWeek,
+  weeklyMinimumKindMembersInPool,
+} from "./weekly-early-late-balance";
 
 const DUTY_MEMBERS: DutyMember[] = (
   Object.keys(DUTY_MEMBER_RANK_ORDER_BY_MEMBER) as DutyMember[]
@@ -83,7 +105,7 @@ function tryAssignFixedSlot(
   assignedToday: Partial<Record<DutyMember, DutySlotKind>>,
   yesterdayKind: Partial<Record<DutyMember, DutySlotKind>>,
   cells: Record<RosterColumnPerson, string>,
-  dutyCounts: Record<DutyMember, number>,
+  auxiliaryDutyCounts: Record<DutyMember, number>,
   allowSoftMorningOnLate: boolean,
   holidayMap: Record<ISODateString, string>,
 ): boolean {
@@ -96,7 +118,7 @@ function tryAssignFixedSlot(
     return false;
   }
   assignedToday[pick] = slot.kind;
-  dutyCounts[pick] += 1;
+  auxiliaryDutyCounts[pick] = (auxiliaryDutyCounts[pick] ?? 0) + 1;
   const prev = cells[pick] ?? "";
   cells[pick] = mergeDutyLabel(prev, slot.kind);
   return true;
@@ -160,7 +182,7 @@ function tryAssignCongressWithOuenFallback(
   assignedToday: Partial<Record<DutyMember, DutySlotKind>>,
   yesterdayKind: Partial<Record<DutyMember, DutySlotKind>>,
   cells: Record<RosterColumnPerson, string>,
-  dutyCounts: Record<DutyMember, number>,
+  auxiliaryDutyCounts: Record<DutyMember, number>,
   hol: Record<ISODateString, string>,
   unfilled: UnfilledSlot[],
 ): void {
@@ -186,7 +208,7 @@ function tryAssignCongressWithOuenFallback(
         assignedToday,
         yesterdayKind,
         cells,
-        dutyCounts,
+        auxiliaryDutyCounts,
         false,
         hol,
       ) ||
@@ -199,7 +221,7 @@ function tryAssignCongressWithOuenFallback(
         assignedToday,
         yesterdayKind,
         cells,
-        dutyCounts,
+        auxiliaryDutyCounts,
         true,
         hol,
       );
@@ -216,7 +238,7 @@ function tryAssignCongressWithOuenFallback(
     unfilled.push({ date, slotId: slot.id, kind: slot.kind });
     return;
   }
-  pool.sort((a, b) => compareForAssignment(a, b, dutyCounts));
+  pool.sort((a, b) => compareForAssignment(a, b, auxiliaryDutyCounts));
   for (const m of pool) {
     if (
       tryAssignFixedSlot(
@@ -228,7 +250,7 @@ function tryAssignCongressWithOuenFallback(
         assignedToday,
         yesterdayKind,
         cells,
-        dutyCounts,
+        auxiliaryDutyCounts,
         false,
         hol,
       )
@@ -245,7 +267,7 @@ function tryAssignCongressWithOuenFallback(
         assignedToday,
         yesterdayKind,
         cells,
-        dutyCounts,
+        auxiliaryDutyCounts,
         true,
         hol,
       )
@@ -303,6 +325,53 @@ function hadSunOrHolidayMainYesterday(
   return isSunday(yesterday) || Boolean(holidayNameOn(yesterday, holidayMap));
 }
 
+function preferFilterKeepingWeeklyMin(
+  pool: DutyMember[],
+  weeklyMinGuard: Set<DutyMember> | undefined,
+  keep: (m: DutyMember) => boolean,
+): DutyMember[] {
+  const filtered = pool.filter(keep);
+  if (filtered.length === 0) return pool;
+  if (
+    weeklyMinGuard &&
+    weeklyMinGuard.size > 0 &&
+    !filtered.some((m) => weeklyMinGuard.has(m))
+  ) {
+    return pool;
+  }
+  return filtered;
+}
+
+/** 前日が遅番・予備の部員は早番を原則つけない（国会翌日は可。他に候補がいる限り）。 */
+function preferAvoidEarlyAfterLateShift(
+  pool: DutyMember[],
+  slotKind: DutySlotKind,
+  yesterdayKind: Partial<Record<DutyMember, DutySlotKind>>,
+): DutyMember[] {
+  if (slotKind !== "早番") return pool;
+  const without = pool.filter((m) => !hadLateShiftYesterday(yesterdayKind, m));
+  return without.length > 0 ? without : pool;
+}
+
+/** リトライ上限（打切りによりこれ未満で終了することが多い） */
+const ROSTER_GENERATION_MAX_ATTEMPTS = 30;
+/** この回数連続で偏りスコアが改善しなければ打切り */
+const ROSTER_RETRY_STALE_ATTEMPTS = 5;
+
+function compareWithTieBreak(
+  baseCompare: (a: DutyMember, b: DutyMember) => number,
+  a: DutyMember,
+  b: DutyMember,
+  tieBreakOrder: DutyMember[],
+): number {
+  const c = baseCompare(a, b);
+  if (c !== 0) return c;
+  const ia = tieBreakOrder.indexOf(a);
+  const ib = tieBreakOrder.indexOf(b);
+  return ia - ib;
+}
+
+/** 日曜・祝日のメイン出勤の翌日は早番を原則つけない（他に候補がいる限り）。 */
 function preferAvoidEarlyAfterSunHolidayMain(
   pool: DutyMember[],
   slotKind: DutySlotKind,
@@ -315,6 +384,36 @@ function preferAvoidEarlyAfterSunHolidayMain(
     (m) => !hadSunOrHolidayMainYesterday(m, date, yesterdayKind, holidayMap),
   );
   return without.length > 0 ? without : pool;
+}
+
+/** 前日も早番だった部員は、同日早番の候補から外す（他に候補がいる限り）。 */
+function preferAvoidConsecutiveEarlyShift(
+  pool: DutyMember[],
+  slotKind: DutySlotKind,
+  yesterdayKind: Partial<Record<DutyMember, DutySlotKind>>,
+  weeklyMinGuard?: Set<DutyMember>,
+): DutyMember[] {
+  if (slotKind !== "早番") return pool;
+  return preferFilterKeepingWeeklyMin(
+    pool,
+    weeklyMinGuard,
+    (m) => yesterdayKind[m] !== "早番",
+  );
+}
+
+/** 前日も遅番だった部員は、同日遅番の候補から外す（他に候補がいる限り）。 */
+function preferAvoidConsecutiveLateShift(
+  pool: DutyMember[],
+  slotKind: DutySlotKind,
+  yesterdayKind: Partial<Record<DutyMember, DutySlotKind>>,
+  weeklyMinGuard?: Set<DutyMember>,
+): DutyMember[] {
+  if (slotKind !== "遅番") return pool;
+  return preferFilterKeepingWeeklyMin(
+    pool,
+    weeklyMinGuard,
+    (m) => yesterdayKind[m] !== "遅番",
+  );
 }
 
 /** 日曜・祝日の予備は夜✖️の人を避ける（他に候補がいる限り）。土曜は予備枠がない想定。 */
@@ -332,7 +431,10 @@ function preferNonNightForSundayHolidayReserve(
   return withoutNight.length > 0 ? withoutNight : pool;
 }
 
-export function generateRoster(input: GenerateRosterInput): {
+function generateRosterOnce(
+  input: GenerateRosterInput,
+  tieBreakOrder: DutyMember[],
+): {
   days: GeneratedRosterDay[];
   unfilled: UnfilledSlot[];
 } {
@@ -347,16 +449,22 @@ export function generateRoster(input: GenerateRosterInput): {
     prefsMap[m] = preferencesToMap(preferencesByMember[m]?.entries ?? []);
   }
 
-  const dutyCounts: Record<DutyMember, number> = {} as Record<DutyMember, number>;
+  const earlyLateDutyCounts = createEarlyLateDutyCounts();
+  const auxiliaryDutyCounts: Record<DutyMember, number> = {} as Record<
+    DutyMember,
+    number
+  >;
   for (const m of DUTY_MEMBERS) {
-    dutyCounts[m] = 0;
+    auxiliaryDutyCounts[m] = 0;
   }
 
   let yesterdayKind: Partial<Record<DutyMember, DutySlotKind>> = {};
+  const weeklyEarlyLate = createWeeklyEarlyLateCounts();
   const days: GeneratedRosterDay[] = [];
   const unfilled: UnfilledSlot[] = [];
 
   for (const date of eachDateInclusive(rangeStart, rangeEnd)) {
+    resetWeeklyEarlyLateCountsIfNewWeek(weeklyEarlyLate, date);
     const slots = buildDemandSlotsForDate(admin, date, hol);
     const assignedToday: Partial<Record<DutyMember, DutySlotKind>> = {};
     const cells = emptyCells();
@@ -371,7 +479,7 @@ export function generateRoster(input: GenerateRosterInput): {
           assignedToday,
           yesterdayKind,
           cells,
-          dutyCounts,
+          auxiliaryDutyCounts,
           hol,
           unfilled,
         );
@@ -388,7 +496,7 @@ export function generateRoster(input: GenerateRosterInput): {
           assignedToday,
           yesterdayKind,
           cells,
-          dutyCounts,
+          auxiliaryDutyCounts,
           false,
           hol,
         );
@@ -402,7 +510,7 @@ export function generateRoster(input: GenerateRosterInput): {
             assignedToday,
             yesterdayKind,
             cells,
-            dutyCounts,
+            auxiliaryDutyCounts,
             true,
             hol,
           );
@@ -452,13 +560,144 @@ export function generateRoster(input: GenerateRosterInput): {
         continue;
       }
 
-      pool = preferNonNightForSundayHolidayReserve(pool, slot.kind, date, prefsMap, hol);
-      pool = preferAvoidConsecutiveRestDayAttendance(pool, slot.kind, date, yesterdayKind, hol);
-      pool = preferAvoidEarlyAfterSunHolidayMain(pool, slot.kind, date, yesterdayKind, hol);
-      pool.sort((a, b) => compareForAssignment(a, b, dutyCounts));
+      const isCongressNomineeBlocked = (m: DutyMember) =>
+        (slot.kind === "早番" || slot.kind === "遅番") &&
+        isBlockedFromWeekdayEarlyLateDueToCongressNomination(admin, date, m, hol);
+
+      let weeklyMinGuard: Set<DutyMember> | undefined;
+      if (slot.kind === "早番" || slot.kind === "遅番") {
+        if (slot.kind === "早番") {
+          pool = preferAvoidEarlyAfterLateShift(pool, slot.kind, yesterdayKind);
+          pool = preferAvoidEarlyAfterSunHolidayMain(
+            pool,
+            slot.kind,
+            date,
+            yesterdayKind,
+            hol,
+          );
+        }
+        pool = augmentPoolForEqualizationAssignment(
+          pool,
+          slot.kind,
+          date,
+          admin,
+          prefsMap,
+          assignedToday,
+          yesterdayKind,
+          hol,
+          isCongressNomineeBlocked,
+        );
+        weeklyMinGuard = weeklyMinimumKindMembersInPool(
+          pool,
+          slot.kind,
+          weeklyEarlyLate.early,
+          weeklyEarlyLate.late,
+          admin,
+          date,
+          hol,
+        );
+        pool = preferMinimumWeeklyEarlyLateInPool(
+          pool,
+          slot.kind,
+          weeklyEarlyLate.early,
+          weeklyEarlyLate.late,
+          admin,
+          date,
+          hol,
+        );
+        pool = preferMinimumPeriodEarlyLateInPool(
+          pool,
+          slot.kind,
+          earlyLateDutyCounts.early,
+          earlyLateDutyCounts.late,
+        );
+        pool = preferAvoidConsecutiveEarlyShift(
+          pool,
+          slot.kind,
+          yesterdayKind,
+          weeklyMinGuard,
+        );
+        pool = preferAvoidConsecutiveLateShift(
+          pool,
+          slot.kind,
+          yesterdayKind,
+          weeklyMinGuard,
+        );
+      } else {
+        pool = preferNonNightForSundayHolidayReserve(pool, slot.kind, date, prefsMap, hol);
+        pool = preferAvoidConsecutiveRestDayAttendance(
+          pool,
+          slot.kind,
+          date,
+          yesterdayKind,
+          hol,
+        );
+      }
+      if (slot.kind === "早番") {
+        pool.sort((a, b) =>
+          compareWithTieBreak(
+            (x, y) =>
+              compareForEarlyLateSlotAssignment(
+                x,
+                y,
+                "早番",
+                weeklyEarlyLate.early,
+                weeklyEarlyLate.late,
+                earlyLateDutyCounts.early,
+                date,
+                prefsMap,
+                yesterdayKind,
+                hol,
+              ),
+            a,
+            b,
+            tieBreakOrder,
+          ),
+        );
+      } else if (slot.kind === "遅番") {
+        pool.sort((a, b) =>
+          compareWithTieBreak(
+            (x, y) =>
+              compareForEarlyLateSlotAssignment(
+                x,
+                y,
+                "遅番",
+                weeklyEarlyLate.early,
+                weeklyEarlyLate.late,
+                earlyLateDutyCounts.late,
+                date,
+                prefsMap,
+                yesterdayKind,
+                hol,
+              ),
+            a,
+            b,
+            tieBreakOrder,
+          ),
+        );
+      } else {
+        pool.sort((a, b) =>
+          compareWithTieBreak(
+            (x, y) => compareForAssignment(x, y, auxiliaryDutyCounts),
+            a,
+            b,
+            tieBreakOrder,
+          ),
+        );
+      }
       const pick = pool[0]!;
       assignedToday[pick] = slot.kind;
-      dutyCounts[pick] += 1;
+      if (slot.kind === "早番" || slot.kind === "遅番") {
+        recordEarlyLateDutyAssignment(earlyLateDutyCounts, pick, slot.kind);
+      } else {
+        auxiliaryDutyCounts[pick] = (auxiliaryDutyCounts[pick] ?? 0) + 1;
+      }
+      if (
+        (slot.kind === "早番" || slot.kind === "遅番") &&
+        !isExcludedFromWeeklyEarlyLateBalance(admin, date, pick, hol)
+      ) {
+        recordWeeklyEarlyLateAssignment(weeklyEarlyLate, pick, slot.kind);
+      }
       const prev = cells[pick] ?? "";
       cells[pick] = mergeDutyLabel(prev, slot.kind);
     }
@@ -466,7 +705,7 @@ export function generateRoster(input: GenerateRosterInput): {
     yesterdayKind = { ...assignedToday };
 
     const holName = hol[date] ?? "";
-    const finalized = finalizeRowCells(admin, date, cells);
+    const finalized = finalizeRowCells(admin, date, cells, prefsMap, hol);
     const preferenceMarksByColumnPerson = {} as Record<RosterColumnPerson, string>;
     for (const p of ROSTER_COLUMN_ORDER) {
       if (p === "牛田" || p === "倉科") {
@@ -492,12 +731,54 @@ export function generateRoster(input: GenerateRosterInput): {
   return { days, unfilled };
 }
 
+/** 同数均等化を優先し、改善が止まるまで試行して最も偏りの少ない案を採用する */
+export function generateRoster(input: GenerateRosterInput): {
+  days: GeneratedRosterDay[];
+  unfilled: UnfilledSlot[];
+} {
+  const hol = mergeHolidayMap(input.holidaysExtra);
+  let best: { days: GeneratedRosterDay[]; unfilled: UnfilledSlot[] } | null =
+    null;
+  let bestScore = Infinity;
+  let staleAttempts = 0;
+
+  for (let attempt = 0; attempt < ROSTER_GENERATION_MAX_ATTEMPTS; attempt++) {
+    const tieBreakOrder = tieBreakOrderForAttempt(attempt);
+    const result = generateRosterOnce(input, tieBreakOrder);
+    const score = scoreRosterEarlyLateBalance(
+      result.days,
+      input.rangeStart,
+      input.rangeEnd,
+      input.admin,
+      hol,
+      result.unfilled,
+    );
+    const better =
+      score < bestScore ||
+      (score === bestScore &&
+        best !== null &&
+        result.unfilled.length < best.unfilled.length);
+    if (best === null || better) {
+      best = result;
+      bestScore = score;
+      staleAttempts = 0;
+    } else {
+      staleAttempts += 1;
+      if (staleAttempts >= ROSTER_RETRY_STALE_ATTEMPTS) break;
+    }
+  }
+
+  return best!;
+}
+
 function finalizeRowCells(
   admin: AdminSettings,
   date: ISODateString,
   draft: Record<RosterColumnPerson, string>,
+  prefsMap: Record<DutyMember, PreferenceMap>,
+  hol: Record<ISODateString, string>,
 ): Record<RosterColumnPerson, string> {
-  const out = { ...draft };
+  let out = { ...draft };
   for (const p of ROSTER_COLUMN_ORDER) {
     if (p === "牛田" || p === "倉科") {
       out[p] = "";
@@ -509,5 +790,7 @@ function finalizeRowCells(
       continue;
     }
   }
+  out = applyCongressNominationCellLabels(out, admin, date, prefsMap, hol);
+  out = applyGraphExclusiveIsobeCellLabel(out, admin, date, prefsMap);
   return out;
 }

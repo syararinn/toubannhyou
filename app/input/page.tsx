@@ -32,6 +32,9 @@ import {
   countRestCrossMarks,
   emptyPreferenceFlags,
   getEffectivePreferenceCaps,
+  isPreferenceToggleDisabled,
+  preferenceToggleBlockedBySameDayConflict,
+  sanitizeSameDayPreferenceFlags,
   wouldExceedPreferenceCap,
   yearMonthFromParts,
   type PreferenceToggleKey,
@@ -117,11 +120,14 @@ const btnSecondary =
 
 const AI_RULES_PUBLIC_TEXT = [
   "勤務の前後に十分なインターバルが確保されるよう配慮します。",
-  "当番の回数が極端に偏らないよう、全員が公平になるよう調整を試みます。",
+  "毎週（月曜始まり）、当番の回数が可能な限り均等になるよう調整します（国会当番・グラフ専任・出向者は対象外）。",
+  "AIとして要件定義に基づき極限まで均等化を目指し計算し直します。",
   "ご入力いただいた希望は可能な範囲で尊重しますが、全体の制約を満たす必要があるため、すべてが通るとは限りません。",
   "「休」「✖️」はその日の当番を希望しないものです。「夜✖️」は遅番と休日の出勤（土日祝のメイン枠）を希望しないものです。早番は可で、休日の予備は原則避けますが、どうしても人手が足りないときのみ割り当て得ます。",
+  "原則として、遅番の翌日は早番には入りません。他に配置できる人がいない場合のみ早番になることがあります。",
   "日曜・祝日にメイン出勤した方の翌日は、原則として早番には入りません。他に配置できる人がいない場合のみ早番になることがあります。",
   "土曜・日曜・祝日の出勤は、原則として休日の連続出勤にはしません。他に配置できる人がいない場合のみ、休日が続いても出勤になることがあります。",
+  "早番・遅番は、原則として前日と同じ方に続けてつけません。他に配置できる人がいない場合のみ、連続になることがあります。",
   "国会会期・休刊作業日・グラフ専任・出向など、管理者が登録した条件は必ず守られます。",
   "最終的な割当はシステムが複数の条件を総合して決定します。",
 ] as const;
@@ -286,12 +292,18 @@ export default function MemberInputPage() {
     if (f.morningHalfOff || f.afternoonHalfOff) {
       f = { ...f, fullDayOff: false, fullyUnavailable: false };
     }
-    return f;
+    return sanitizeSameDayPreferenceFlags(f);
   }
 
   function toggleFlag(date: ISODateString, key: PreferenceToggleKey, checked: boolean) {
     setCapBlockMessage(null);
-    const cur = { ...(flagsByDate[date] ?? emptyPreferenceFlags()), [key]: checked };
+    const existing = flagsByDate[date] ?? emptyPreferenceFlags();
+    const sameDayBlock = preferenceToggleBlockedBySameDayConflict(existing, key, checked);
+    if (sameDayBlock) {
+      setCapBlockMessage(sameDayBlock);
+      return;
+    }
+    const cur = { ...existing, [key]: checked };
     const merged = applyExclusiveRules(date, cur);
     if (checked && wouldExceedPreferenceCap(key, flagsByDate, year, month0, date, merged, effectiveCaps)) {
       if (key === "fullDayOff" || key === "fullyUnavailable") {
@@ -361,7 +373,7 @@ export default function MemberInputPage() {
           <aside className="rounded-xl border border-amber-200/80 bg-amber-50/90 px-4 py-3 text-sm text-amber-950 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-100">
             <p className="font-medium">仕様の透明化</p>
             <p className="mt-1 text-amber-900/90 dark:text-amber-200/90">
-              当番表は、勤務間インターバルや公平な回数配分など、公開している基本方針に沿って自動生成されます。詳しくは右上の「AIによる生成ルールを見る」を開いてください。
+              当番表は、勤務間インターバルや公平な配分など、公開している基本方針に沿って自動生成されます。詳しくは右上の「AIによる生成ルールを見る」を開いてください。
             </p>
           </aside>
         </div>
@@ -397,7 +409,7 @@ export default function MemberInputPage() {
           <>
             <Section
               title={`希望入力（${monthTitle()}・${selectedMember}）`}
-              description="各日について「休」「✖️」「午前半休」「午後半休」「夜✖️」から該当するものにチェックを入れます。休・✖️は他の全日系・半休と同時には選べず、その日の当番（早番・遅番・メイン・予備・国会など）には原則入りません。夜✖️は遅番と休日の出勤（土日祝のメイン枠）には入りませんが、早番には入る場合があります。休日の予備は原則避けますが、他に配置できる人がいない場合のみ割り当て得ます。日曜・祝日のメイン出勤の翌日は早番を原則避けますが、人手が足りない場合のみ早番になることがあります。土曜・日曜・祝日の出勤は休日の連続出勤を原則避けますが、人手が足りない場合のみ連続になることがあります。平日で国会当番に指定されている日は行の色と「注意」欄でお知らせします。"
+              description="各日について「休」「✖️」「午前半休」「午後半休」「夜✖️」から該当するものにチェックを入れます。休・✖️は他の全日系・半休と同時には選べません。同日に午前半休と午後半休、または午前半休と夜✖を両方選ぶことはできません。夜✖は遅番と休日の出勤（土日祝のメイン枠）には入りませんが、早番には入る場合があります。平日で国会当番に指定されている日は行の色と「注意」欄でお知らせします。"
             >
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
@@ -602,18 +614,29 @@ export default function MemberInputPage() {
                                 ["afternoonHalfOff", f.afternoonHalfOff],
                                 ["nightUnavailable", f.nightUnavailable],
                               ] as const
-                            ).map(([key, checked]) => (
+                            ).map(([key, checked]) => {
+                              const disabled = isPreferenceToggleDisabled(f, key);
+                              return (
                               <td key={key} className="px-2 py-2 text-center align-middle">
                                 <input
                                   type="checkbox"
-                                  className="h-4 w-4 rounded border-neutral-300 dark:border-neutral-600"
+                                  className="h-4 w-4 rounded border-neutral-300 disabled:cursor-not-allowed disabled:opacity-40 dark:border-neutral-600"
                                   checked={checked}
+                                  disabled={disabled}
+                                  title={
+                                    disabled
+                                      ? key === "morningHalfOff"
+                                        ? "午後半休または夜✖が付いているため選べません"
+                                        : "午前半休が付いているため選べません"
+                                      : undefined
+                                  }
                                   onChange={(e) =>
                                     toggleFlag(date, key, e.target.checked)
                                   }
                                 />
                               </td>
-                            ))}
+                            );
+                            })}
                             <td className="px-3 py-2 text-xs">
                               <div className="flex flex-col gap-1.5">
                                 {congressLabels.map((line) => (

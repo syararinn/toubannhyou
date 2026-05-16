@@ -4,11 +4,15 @@ import type {
   ISODateString,
   MemberDayPreferenceFlags,
 } from "@/types";
-import { DUTY_MEMBER_RANK_ORDER_BY_MEMBER } from "@/types";
 import { isSaturday, isSunday } from "./dates";
 import { holidayNameOn } from "./holidays";
 import type { DutySlotKind } from "./slots";
-import { isGraphExclusiveForIsobe, slotIsEarlyLike, slotIsLateLike } from "./slots";
+import {
+  isCongressSlotKind,
+  isGraphExclusiveForIsobe,
+  slotIsEarlyLike,
+  slotIsLateLike,
+} from "./slots";
 
 export type PreferenceMap = Record<ISODateString, MemberDayPreferenceFlags>;
 
@@ -50,12 +54,7 @@ export function getFlags(
 }
 
 function isCongressKind(kind: DutySlotKind): boolean {
-  return (
-    kind === "国会週番" ||
-    kind === "国会月番" ||
-    kind === "国会（応援）" ||
-    kind === "国会"
-  );
+  return isCongressSlotKind(kind);
 }
 
 /** 夜✖️で「休日出勤」とみなすメイン枠（土日祝。平日祝のメインも含む） */
@@ -103,34 +102,41 @@ export function violatesMorningHalfOnLateSlot(
 /** 前日に実際に割り当てられた勤務種別のみ（未割当はキーなし） */
 export type YesterdaySlotMap = Partial<Record<DutyMember, DutySlotKind>>;
 
-export function hadLateLikeYesterday(
+/** 前日が遅番または予備（国会系は含めない） */
+export function hadLateShiftYesterday(
   lastKindByMember: YesterdaySlotMap,
   member: DutyMember,
 ): boolean {
   const k = lastKindByMember[member];
-  return k !== undefined && slotIsLateLike(k);
+  return k === "遅番" || k === "予備";
 }
 
+/** 前日が国会・国会月番・国会週番・国会（応援）のいずれか */
+export function hadCongressDutyYesterday(
+  lastKindByMember: YesterdaySlotMap,
+  member: DutyMember,
+): boolean {
+  const k = lastKindByMember[member];
+  return k !== undefined && isCongressSlotKind(k);
+}
+
+/** @deprecated インターバル判定は hadLateShiftYesterday を使用 */
+export function hadLateLikeYesterday(
+  lastKindByMember: YesterdaySlotMap,
+  member: DutyMember,
+): boolean {
+  return hadLateShiftYesterday(lastKindByMember, member);
+}
+
+/** 遅番・予備の翌日は早番不可。国会系の翌日は早番可（同数化で早番に回す）。 */
 export function violatesInterval(
   kind: DutySlotKind,
   lastKindByMember: YesterdaySlotMap,
   member: DutyMember,
 ): boolean {
   if (!slotIsEarlyLike(kind)) return false;
-  return hadLateLikeYesterday(lastKindByMember, member);
+  return hadLateShiftYesterday(lastKindByMember, member);
 }
 
-/**
- * 端数を下位側へ寄せるためのタイブレーク（数値が小さいほど先に割当候補として選ばれる）
- * ※ UI には出さない。コメントのみで意図を残す。
- */
-export function compareForAssignment(
-  a: DutyMember,
-  b: DutyMember,
-  dutyCounts: Record<DutyMember, number>,
-): number {
-  const ca = dutyCounts[a];
-  const cb = dutyCounts[b];
-  if (ca !== cb) return ca - cb;
-  return DUTY_MEMBER_RANK_ORDER_BY_MEMBER[a] - DUTY_MEMBER_RANK_ORDER_BY_MEMBER[b];
-}
+/** @see compareForDutyCountAssignment — 部員非公開の当番回数調整 */
+export { compareForDutyCountAssignment as compareForAssignment } from "./duty-count-assignment";

@@ -19,13 +19,17 @@ export type DutySlotKind =
   | "国会（応援）"
   | "国会";
 
-function isCongressKind(kind: DutySlotKind): boolean {
+export function isCongressSlotKind(kind: DutySlotKind): boolean {
   return (
     kind === "国会週番" ||
     kind === "国会月番" ||
     kind === "国会（応援）" ||
     kind === "国会"
   );
+}
+
+function isCongressKind(kind: DutySlotKind): boolean {
+  return isCongressSlotKind(kind);
 }
 
 /** 勤務間インターバル・午後半休判定用の「遅番側」相当（夜✖️の可否とは別。夜✖️は eligibility で日付付き判定） */
@@ -187,6 +191,7 @@ export function buildDemandSlotsForDate(
   return slots;
 }
 
+/** D 列（行事予定）。国会会期・グラフ専任はセルに出さず、当番割当／磯田列で表現する。 */
 export function buildEventsColumnText(
   admin: AdminSettings,
   date: ISODateString,
@@ -195,15 +200,6 @@ export function buildEventsColumnText(
   const parts: string[] = [];
   const hol = holidayNameOn(date, holidayExtra);
   if (hol) parts.push(hol);
-  if (isInAnyDietSession(admin, date)) parts.push("国会会期中");
-  if (
-    isWeekdayMonFri(date) &&
-    weekBlockIntersectsDietSession(admin, date) &&
-    !isInAnyDietSession(admin, date)
-  ) {
-    parts.push("国会会期にかかる週");
-  }
   if (isNewspaperNonPublicationDay(admin, date)) parts.push("新聞休刊作業日");
-  if (isGraphExclusiveForIsobe(admin, date)) parts.push("グラフ専任（磯田）");
   return parts.join("／");
 }

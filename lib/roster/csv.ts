@@ -1,5 +1,6 @@
 import type { GeneratedRosterDay } from "@/types";
 import { ROSTER_COLUMN_ORDER } from "@/types";
+import { formatRosterDutyCellText } from "./roster-cell-display";
 
 function csvEscapeCell(value: string): string {
   if (/[",\r\n]/.test(value)) {
@@ -20,7 +21,10 @@ export function rosterDaysToCsv(rows: GeneratedRosterDay[]): string {
   const lines: string[] = [header.map(csvEscapeCell).join(",")];
   for (const row of rows) {
     const cells = ROSTER_COLUMN_ORDER.map((name) => {
-      const duty = row.rosterCellsByColumnPerson[name] ?? "";
+      const duty = formatRosterDutyCellText(
+        row.rosterCellsByColumnPerson[name] ?? "",
+        row,
+      );
       const marks = row.preferenceMarksByColumnPerson?.[name]?.trim() ?? "";
       if (!marks) return duty;
       if (!duty) return marks;
