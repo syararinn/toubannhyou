@@ -6,7 +6,7 @@ import type {
   MemberPreferenceInput,
   RosterColumnPerson,
 } from "@/types";
-import { DUTY_MEMBER_RANK_ORDER_BY_MEMBER, ROSTER_COLUMN_ORDER } from "@/types";
+import { DUTY_MEMBER_RANK_ORDER_BY_MEMBER, DUTY_MEMBER_RANK_PRIORITY_ORDER, ROSTER_COLUMN_ORDER } from "@/types";
 import {
   addDays,
   eachDateInclusive,
@@ -45,8 +45,6 @@ import {
   recordEarlyLateDutyAssignment,
   type EarlyLateDutyCounts,
 } from "./early-late-duty-counts";
-import { compareForEarlyLateSlotAssignment } from "./early-late-assignment-compare";
-import { augmentPoolForEqualizationAssignment } from "./equalization-candidate-prefs";
 import {
   scoreMonthlyEarlyLateCombinedSpread,
   scoreRosterEarlyLateBalance,
@@ -54,11 +52,8 @@ import {
 import {
   createWeeklyEarlyLateCounts,
   isExcludedFromWeeklyEarlyLateBalance,
-  preferMinimumPeriodEarlyLateInPool,
-  preferMinimumWeeklyEarlyLateInPool,
   recordWeeklyEarlyLateAssignment,
   resetWeeklyEarlyLateCountsIfNewWeek,
-  weeklyMinimumKindMembersInPool,
   type WeeklyEarlyLateCounts,
 } from "./weekly-early-late-balance";
 
@@ -414,6 +409,22 @@ function compareWithTieBreak(
   return rotatedRankTieCompare(a, b, rankTieRotationAttempt);
 }
 
+/**
+ * 早番・遅番の DFS で試す順序。ハード適合後のプールを要件【5】の序列下位→上位で並べる。
+ * `rankTieRotationAttempt` は月次再試行で起点をローテーションする。
+ */
+function sortedEarlyLateCandidatesByRankPriority(
+  pool: DutyMember[],
+  rankTieRotationAttempt: number,
+): DutyMember[] {
+  const r = ((rankTieRotationAttempt % 7) + 7) % 7;
+  const rotated: DutyMember[] = [
+    ...DUTY_MEMBER_RANK_PRIORITY_ORDER.slice(r),
+    ...DUTY_MEMBER_RANK_PRIORITY_ORDER.slice(0, r),
+  ];
+  return rotated.filter((m) => pool.includes(m));
+}
+
 /** 日曜・祝日のメイン出勤の翌日は早番を原則つけない（他に候補がいる限り）。 */
 function preferAvoidEarlyAfterSunHolidayMain(
   pool: DutyMember[],
@@ -626,125 +637,43 @@ function buildSortedCandidatePoolForVariableSlot(
 
   if (pool.length === 0) return [];
 
-  const isCongressNomineeBlocked = (m: DutyMember) =>
-    (slot.kind === "早番" || slot.kind === "遅番") &&
-    isBlockedFromWeekdayEarlyLateDueToCongressNomination(admin, date, m, hol);
-
-  let weeklyMinGuard: Set<DutyMember> | undefined;
   if (slot.kind === "早番" || slot.kind === "遅番") {
     if (slot.kind === "早番") {
       pool = preferAvoidEarlyAfterLateShift(pool, slot.kind, yesterdayKind);
       pool = preferAvoidEarlyAfterSunHolidayMain(pool, slot.kind, date, yesterdayKind, hol);
     }
-    pool = augmentPoolForEqualizationAssignment(
-      pool,
-      slot.kind,
-      date,
-      admin,
-      prefsMap,
-      state.assignedToday,
-      yesterdayKind,
-      hol,
-      isCongressNomineeBlocked,
-    );
-    weeklyMinGuard = weeklyMinimumKindMembersInPool(
-      pool,
-      slot.kind,
-      state.weeklyEarlyLate.early,
-      state.weeklyEarlyLate.late,
-      admin,
-      date,
-      hol,
-    );
-    pool = preferMinimumWeeklyEarlyLateInPool(
-      pool,
-      slot.kind,
-      state.weeklyEarlyLate.early,
-      state.weeklyEarlyLate.late,
-      admin,
-      date,
-      hol,
-    );
-    pool = preferMinimumPeriodEarlyLateInPool(
-      pool,
-      slot.kind,
-      state.earlyLateDutyCounts.early,
-      state.earlyLateDutyCounts.late,
-    );
-    pool = preferAvoidConsecutiveEarlyShift(pool, slot.kind, yesterdayKind, weeklyMinGuard);
-    pool = preferAvoidConsecutiveLateShift(pool, slot.kind, yesterdayKind, weeklyMinGuard);
-  } else {
-    pool = preferNonNightForSundayHolidayReserve(pool, slot.kind, date, prefsMap, hol);
-    pool = preferAvoidConsecutiveRestDayAttendance(pool, slot.kind, date, yesterdayKind, hol);
+    pool = preferAvoidConsecutiveEarlyShift(pool, slot.kind, yesterdayKind, undefined);
+    pool = preferAvoidConsecutiveLateShift(pool, slot.kind, yesterdayKind, undefined);
+    return sortedEarlyLateCandidatesByRankPriority(pool, rankTieRotationAttempt);
   }
 
+  pool = preferNonNightForSundayHolidayReserve(pool, slot.kind, date, prefsMap, hol);
+  pool = preferAvoidConsecutiveRestDayAttendance(pool, slot.kind, date, yesterdayKind, hol);
+
   const sorted = [...pool];
-  if (slot.kind === "早番") {
-    sorted.sort((a, b) =>
-      compareWithTieBreak(
-        (x, y) =>
-          compareForEarlyLateSlotAssignment(
-            x,
-            y,
-            "早番",
-            state.weeklyEarlyLate.early,
-            state.weeklyEarlyLate.late,
-            state.earlyLateDutyCounts.early,
-            date,
-            prefsMap,
-            yesterdayKind,
-            hol,
-          ),
-        a,
-        b,
-        rankTieRotationAttempt,
-      ),
-    );
-  } else if (slot.kind === "遅番") {
-    sorted.sort((a, b) =>
-      compareWithTieBreak(
-        (x, y) =>
-          compareForEarlyLateSlotAssignment(
-            x,
-            y,
-            "遅番",
-            state.weeklyEarlyLate.early,
-            state.weeklyEarlyLate.late,
-            state.earlyLateDutyCounts.late,
-            date,
-            prefsMap,
-            yesterdayKind,
-            hol,
-          ),
-        a,
-        b,
-        rankTieRotationAttempt,
-      ),
-    );
-  } else {
-    sorted.sort((a, b) =>
-      compareWithTieBreak(
-        (x, y) =>
-          compareForMonthlyHolidayMainOrReserve(
-            x,
-            y,
-            slot.kind,
-            state.monthlyHolidayMainCounts,
-            state.monthlyHolidayReserveCounts,
-            state.auxiliaryDutyCounts,
-          ),
-        a,
-        b,
-        0,
-      ),
-    );
-  }
+  sorted.sort((a, b) =>
+    compareWithTieBreak(
+      (x, y) =>
+        compareForMonthlyHolidayMainOrReserve(
+          x,
+          y,
+          slot.kind,
+          state.monthlyHolidayMainCounts,
+          state.monthlyHolidayReserveCounts,
+          state.auxiliaryDutyCounts,
+        ),
+      a,
+      b,
+      0,
+    ),
+  );
   return sorted;
 }
 
 /**
  * 同日の slots を深さ優先で探索し、欠員（未充足枠）数が最小の割当を返す。
- * 候補順は従来のソフト制約ソートのまま（ヒューリスティクス）。
+ * 欠員本数が同じ解のうち、(1) 当日遅番の付け先の累計負荷和 (2) 期間内遅番の偏りスコア (3) 遅番の最大回数 (4) 早番偏りが小さいものを採用する。
+ * 早番・遅番はハード＋回避系の後、`DUTY_MEMBER_RANK_PRIORITY_ORDER` 順で候補を試す。
  */
 function runDaySlotsAssignmentSearch(
   slots: DemandSlot[],
@@ -756,14 +685,70 @@ function runDaySlotsAssignmentSearch(
   initial: DayAssignmentSearchState,
   rankTieRotationAttempt: number,
 ): { best: DayAssignmentSearchState; unfilled: UnfilledSlot[] } {
+  type LeafRank = readonly [number, number, number, number, number];
   let searchNodes = 0;
-  let bestVacancies = Infinity;
   let best: DayAssignmentSearchState | null = null;
   let bestUnfilled: UnfilledSlot[] = [];
+  let bestRank: LeafRank | null = null;
+
+  /** `scoreRosterEarlyLateBalance` 内の spread と同形（部員集合固定） */
+  function spreadRecordForMembers(counts: Record<DutyMember, number>): number {
+    if (DUTY_MEMBERS.length < 2) return 0;
+    let min = Infinity;
+    let max = -Infinity;
+    for (const m of DUTY_MEMBERS) {
+      const c = counts[m] ?? 0;
+      if (c < min) min = c;
+      if (c > max) max = c;
+    }
+    const diff = max - min;
+    return diff * diff * 10 + diff * 5;
+  }
+
+  function maxMemberCount(counts: Record<DutyMember, number>): number {
+    let mx = 0;
+    for (const m of DUTY_MEMBERS) {
+      mx = Math.max(mx, counts[m] ?? 0);
+    }
+    return mx;
+  }
+
+  /** 当日に遅番が付いた人の、当該日終了時点の累計遅番回数の合計（小さいほど「すでに多い人に遅番を重ねにくい」） */
+  function todayLateAssigneeCumulativeLateSum(state: DayAssignmentSearchState): number {
+    let s = 0;
+    const late = state.earlyLateDutyCounts.late;
+    for (const m of DUTY_MEMBERS) {
+      if (state.assignedToday[m] === "遅番") {
+        s += late[m] ?? 0;
+      }
+    }
+    return s;
+  }
+
+  function leafRank(failures: UnfilledSlot[], state: DayAssignmentSearchState): LeafRank {
+    const late = state.earlyLateDutyCounts.late;
+    const early = state.earlyLateDutyCounts.early;
+    return [
+      failures.length,
+      todayLateAssigneeCumulativeLateSum(state),
+      spreadRecordForMembers(late),
+      maxMemberCount(late),
+      spreadRecordForMembers(early),
+    ];
+  }
+
+  function rankIsBetter(a: LeafRank, b: LeafRank): boolean {
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] < b[i]) return true;
+      if (a[i] > b[i]) return false;
+    }
+    return false;
+  }
 
   function considerLeaf(failures: UnfilledSlot[], state: DayAssignmentSearchState): void {
-    if (failures.length < bestVacancies) {
-      bestVacancies = failures.length;
+    const r = leafRank(failures, state);
+    if (best === null || bestRank === null || rankIsBetter(r, bestRank)) {
+      bestRank = r;
       best = cloneDayAssignmentSearchState(state);
       bestUnfilled = [...failures];
     }
@@ -772,7 +757,6 @@ function runDaySlotsAssignmentSearch(
   function dfs(slotIndex: number, state: DayAssignmentSearchState, failures: UnfilledSlot[]): void {
     if (searchNodes >= MAX_DAY_ASSIGNMENT_SEARCH_NODES) return;
     searchNodes += 1;
-    if (bestVacancies === 0) return;
 
     if (slotIndex >= slots.length) {
       considerLeaf(failures, state);
@@ -864,7 +848,6 @@ function runDaySlotsAssignmentSearch(
 
     for (const pick of candidates) {
       if (searchNodes >= MAX_DAY_ASSIGNMENT_SEARCH_NODES) return;
-      if (bestVacancies === 0) return;
       const st = cloneDayAssignmentSearchState(state);
       applyVariableSlotToSearchState(st, slot, pick, admin, date, hol);
       dfs(slotIndex + 1, st, failures);
