@@ -1,5 +1,5 @@
 import type { DutyMember, PreferenceLimitApplication, YearMonthString } from "@/types";
-import { preferenceApplicationStorageKey } from "@/lib/preferenceLimits";
+import { preferenceApplicationStorageKey, preferenceApplicationHasAnyReason } from "@/lib/preferenceLimits";
 
 export const PREFERENCE_APPLICATIONS_STORAGE_KEY = "duty-roster-preference-applications-v1";
 
@@ -107,6 +107,17 @@ export function getPreferenceApplication(
 export function upsertPreferenceApplication(
   application: PreferenceLimitApplication,
 ): PreferenceLimitApplication {
+  if (
+    application.status === "pending" &&
+    !preferenceApplicationHasAnyReason(
+      application.restCrossReason,
+      application.nightReason,
+    )
+  ) {
+    throw new Error(
+      "休・✖ または夜✖ のいずれかについて、理由を入力してください。",
+    );
+  }
   const store = loadPreferenceApplicationsFromStorage();
   const key = preferenceApplicationStorageKey(
     application.dutyMember,

@@ -6,6 +6,7 @@ import {
   getEffectivePreferenceCaps,
   getPreferenceApplicationSubmitEligibility,
   needsPreferenceLimitApplication,
+  preferenceApplicationHasAnyReason,
 } from "@/lib/preferenceLimits";
 import {
   newPreferenceApplicationId,
@@ -56,18 +57,26 @@ export function PreferenceLimitApplicationPanel({
       lastRejected !== undefined);
 
   function submitApplication() {
+    const restTrim = restCrossReason.trim();
+    const nightTrim = nightReason.trim();
+    if (!preferenceApplicationHasAnyReason(restCrossReason, nightReason)) {
+      setFormError(
+        "休・✖ または夜✖ のいずれかについて、理由を入力してください。",
+      );
+      return;
+    }
     const wantsRest =
-      need.restCross || requestRestCrossBump || restCrossReason.trim().length > 0;
-    const wantsNight = need.night || requestNightBump || nightReason.trim().length > 0;
+      need.restCross || requestRestCrossBump || restTrim.length > 0;
+    const wantsNight = need.night || requestNightBump || nightTrim.length > 0;
     if (!wantsRest && !wantsNight) {
       setFormError("休・✖ または 夜✖ のいずれかについて申請してください。");
       return;
     }
-    if (wantsRest && !restCrossReason.trim()) {
+    if (wantsRest && !restTrim) {
       setFormError("休・✖ について理由を入力してください。");
       return;
     }
-    if (wantsNight && !nightReason.trim()) {
+    if (wantsNight && !nightTrim) {
       setFormError("夜✖ について理由を入力してください。");
       return;
     }
@@ -76,19 +85,26 @@ export function PreferenceLimitApplicationPanel({
       return;
     }
     setFormError(null);
-    upsertPreferenceApplication({
-      id: newPreferenceApplicationId(),
-      dutyMember,
-      yearMonth,
-      status: "pending",
-      submittedAt: new Date().toISOString(),
-      restCrossReason: wantsRest ? restCrossReason.trim() : "",
-      nightReason: wantsNight ? nightReason.trim() : "",
-      restCrossMarksAtSubmit: restCrossMarks,
-      nightMarksAtSubmit: nightMarks,
-      approvedExtraRestCross: 0,
-      approvedExtraNight: 0,
-    });
+    try {
+      upsertPreferenceApplication({
+        id: newPreferenceApplicationId(),
+        dutyMember,
+        yearMonth,
+        status: "pending",
+        submittedAt: new Date().toISOString(),
+        restCrossReason: wantsRest ? restTrim : "",
+        nightReason: wantsNight ? nightTrim : "",
+        restCrossMarksAtSubmit: restCrossMarks,
+        nightMarksAtSubmit: nightMarks,
+        approvedExtraRestCross: 0,
+        approvedExtraNight: 0,
+      });
+    } catch (e) {
+      setFormError(
+        e instanceof Error ? e.message : "申請を保存できませんでした。",
+      );
+      return;
+    }
     setRestCrossReason("");
     setNightReason("");
     setRequestRestCrossBump(false);
@@ -107,9 +123,7 @@ export function PreferenceLimitApplicationPanel({
 
       {pending ? (
         <p className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-100">
-          <strong>審査中です（{pending.submittedAt.slice(0, 10)} 申請）。</strong>{" "}
-          部長の承認まで、申請時点の件数（休・✖ {pending.restCrossMarksAtSubmit} ／ 夜✖{" "}
-          {pending.nightMarksAtSubmit}）まで入力できます。
+          （{new Date(pending.submittedAt).toLocaleString("ja-JP")} 申請） 部長の承認までお待ち下さい。
         </p>
       ) : null}
 
@@ -165,6 +179,10 @@ export function PreferenceLimitApplicationPanel({
           formError={formError}
           canSubmit={canSubmit}
           blockReason={submitEligibility.blockReason}
+          hasAnyReason={preferenceApplicationHasAnyReason(
+            restCrossReason,
+            nightReason,
+          )}
           onSubmit={submitApplication}
         />
       ) : null}
@@ -191,6 +209,7 @@ function ApplicationForm({
   formError,
   canSubmit,
   blockReason,
+  hasAnyReason,
   onSubmit,
 }: {
   need: { restCross: boolean; night: boolean };
@@ -205,6 +224,7 @@ function ApplicationForm({
   formError: string | null;
   canSubmit: boolean;
   blockReason?: string;
+  hasAnyReason: boolean;
   onSubmit: () => void;
 }) {
   const showRest = need.restCross || requestRestCrossBump;
@@ -263,7 +283,12 @@ function ApplicationForm({
           {formError}
         </p>
       ) : null}
-      <button type="button" className={btnPrimary} disabled={!canSubmit} onClick={onSubmit}>
+      <button
+        type="button"
+        className={btnPrimary}
+        disabled={!canSubmit || !hasAnyReason}
+        onClick={onSubmit}
+      >
         部長へ申請する
       </button>
       {!canSubmit && blockReason ? (

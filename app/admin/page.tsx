@@ -14,6 +14,7 @@ import type {
 } from "@/types";
 import { ROSTER_COLUMN_ORDER } from "@/types";
 import { PreferenceLimitApplicationsAdmin } from "@/components/PreferenceLimitApplicationsAdmin";
+import { PreferenceLimitPendingApprovalsStrip } from "@/components/PreferenceLimitPendingApprovalsStrip";
 import {
   loadAdminSettingsFromStorage,
   saveAdminSettingsToStorage,
@@ -295,6 +296,8 @@ export default function AdminSettingsPage() {
       </header>
 
       <main className="mx-auto flex max-w-3xl flex-col gap-8 px-4 py-10 sm:px-6">
+        <PreferenceLimitPendingApprovalsStrip />
+
         <Section
           title="国会会期"
           description="通常国会・臨時国会など、開会日から会期末までを登録します。複数会期がある場合は行を追加してください。"

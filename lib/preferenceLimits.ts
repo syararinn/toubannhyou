@@ -144,6 +144,14 @@ export function needsPreferenceLimitApplication(
   };
 }
 
+/** 申請に休・✖ または夜✖ のいずれかの理由が書かれているか（両方空は不可） */
+export function preferenceApplicationHasAnyReason(
+  restCrossReason: string,
+  nightReason: string,
+): boolean {
+  return restCrossReason.trim().length > 0 || nightReason.trim().length > 0;
+}
+
 export interface PreferenceApplicationSubmitEligibility {
   allowed: boolean;
   blockReason?: string;

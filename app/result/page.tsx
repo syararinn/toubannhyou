@@ -53,6 +53,51 @@ function validateGenerateRange(
   return null;
 }
 
+const ROSTER_TABLE_COLSPAN =
+  2 + ROSTER_COLUMN_ORDER.length;
+
+function yearMonthKey(iso: ISODateString): string {
+  return iso.slice(0, 7);
+}
+
+/** 例: 2026-05 → 2026年5月 */
+function formatJapaneseYearMonth(ym: string): string {
+  const [y, m] = ym.split("-").map((s) => parseInt(s, 10));
+  if (!Number.isFinite(y) || !Number.isFinite(m)) return ym;
+  return `${y}年${m}月`;
+}
+
+/** ISO 日付から「日」欄用（月は別行で表示するため日のみ） */
+function dayOfMonthLabel(iso: ISODateString): string {
+  const d = parseInt(iso.slice(8, 10), 10);
+  return Number.isFinite(d) ? String(d) : iso.slice(8);
+}
+
+type RosterTableBodyItem =
+  | { kind: "spacer"; key: string }
+  | { kind: "month-banner"; key: string; yearMonth: string }
+  | { kind: "day"; key: string; row: GeneratedRosterDay };
+
+/** 月が変わるたびにスペーサー＋年月行を差し込み、日付は日単位のみの行で続ける */
+function buildRosterTableBodyItems(days: GeneratedRosterDay[]): RosterTableBodyItem[] {
+  const sorted = [...days].sort((a, b) => a.date.localeCompare(b.date));
+  const out: RosterTableBodyItem[] = [];
+  let prevYm: string | null = null;
+  for (const row of sorted) {
+    const ym = yearMonthKey(row.date);
+    if (ym !== prevYm) {
+      if (prevYm !== null) {
+        out.push({ kind: "spacer", key: `spacer-${ym}-1` });
+        out.push({ kind: "spacer", key: `spacer-${ym}-2` });
+      }
+      out.push({ kind: "month-banner", key: `month-${ym}`, yearMonth: ym });
+      prevYm = ym;
+    }
+    out.push({ kind: "day", key: row.date, row });
+  }
+  return out;
+}
+
 const inputDateClass =
   "rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm font-mono tabular-nums text-neutral-900 shadow-sm focus:border-neutral-500 focus:outline-none focus:ring-1 focus:ring-neutral-500 dark:border-neutral-600 dark:bg-neutral-900 dark:text-neutral-100";
 
@@ -92,6 +137,17 @@ function stickyCellBgClass(row: GeneratedRosterDay): string {
     return "bg-pink-50/95 dark:bg-pink-950/35";
   }
   return "bg-inherit";
+}
+
+/** 行事列用：行事予定と祭日（A列では省略）をまとめて表示。重複は1つに。 */
+function rosterCombinedEventsText(row: GeneratedRosterDay): string {
+  const ev = row.eventsAndNotes?.trim() ?? "";
+  const hol = row.nationalHolidayColumnText?.trim() ?? "";
+  if (!ev) return hol;
+  if (!hol) return ev;
+  if (ev === hol || ev.includes(hol)) return ev;
+  if (hol.includes(ev)) return hol;
+  return `${ev}\n${hol}`;
 }
 
 /** 早番＝濃い青、遅番＝赤 */
@@ -137,12 +193,12 @@ function DutyAndPreferenceCell({
     row.preferenceMarksByColumnPerson?.[name]?.trim() ||
     "";
   return (
-    <div className="flex min-h-[2.25rem] flex-col items-center justify-center gap-0.5 py-0.5">
-      <div className="whitespace-pre-wrap text-center leading-snug">
+    <div className="flex min-h-[2.5rem] flex-col items-center justify-center gap-0 px-0.5 py-0 text-center leading-tight">
+      <div className="whitespace-pre-wrap break-words text-center text-[11px] leading-snug sm:text-xs">
         {formatDutyCellText(dutyRaw, row)}
       </div>
       {marks ? (
-        <div className="max-w-[6.5rem] text-center text-[10px] leading-tight text-neutral-500 dark:text-neutral-400">
+        <div className="max-w-[6.5rem] text-center text-[9px] leading-tight text-neutral-500 dark:text-neutral-400">
           {marks}
         </div>
       ) : null}
@@ -436,47 +492,88 @@ export default function ResultPage() {
         {days && days.length > 0 ? (
           <Section
             title="当番表"
-            description="A 列相当から M 列相当まで、要件定義書【6】の列順です。部員列の下段に、その日付の希望（休・✖・午前半休・午後半休・夜×）を併記します。"
+            description="左端は日と曜日のみ（祭日は行事列に統合）。行事列は横書き・約7文字幅で最大2行。各行の高さは行事列の2行分で揃え、全セルを左右・上下中央に配置します。"
           >
             <div className="overflow-x-auto rounded-xl border border-neutral-200 dark:border-neutral-800">
-              <table className="min-w-[1100px] w-full border-collapse text-left text-xs sm:text-sm">
+              <table className="min-w-[1000px] w-full border-collapse text-center text-xs sm:text-sm">
                 <thead>
                   <tr className="border-b border-neutral-200 bg-neutral-50 dark:border-neutral-800 dark:bg-neutral-900/50">
-                    <th className="sticky left-0 z-10 whitespace-nowrap border-r border-neutral-200 bg-neutral-50 px-2 py-2 font-medium dark:border-neutral-800 dark:bg-neutral-900/90">
-                      日付
+                    <th className="sticky left-0 z-10 border-r border-neutral-200 bg-neutral-50 px-1 py-1 align-middle dark:border-neutral-800 dark:bg-neutral-900/90">
+                      <div className="flex flex-col items-center justify-center gap-0 leading-tight">
+                        <span>日</span>
+                        <span className="text-[10px] font-normal text-neutral-600 dark:text-neutral-400">
+                          曜日
+                        </span>
+                      </div>
                     </th>
-                    <th className="whitespace-nowrap px-2 py-2 font-medium">曜日</th>
-                    <th className="whitespace-nowrap px-2 py-2 font-medium">祭日</th>
-                    <th className="min-w-[8rem] px-2 py-2 font-medium">行事予定</th>
+                    <th className="w-[7em] min-w-[7em] max-w-[7em] px-1 py-1 align-middle font-medium">
+                      行事予定
+                    </th>
                     {ROSTER_COLUMN_ORDER.map((name) => (
-                      <th key={name} className="whitespace-nowrap px-2 py-2 text-center font-medium">
+                      <th key={name} className="whitespace-nowrap px-1 py-1 align-middle font-medium">
                         {name}
                       </th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {days.map((row) => {
+                  {buildRosterTableBodyItems(days).map((item) => {
+                    if (item.kind === "spacer") {
+                      return (
+                        <tr key={item.key} aria-hidden className="h-2">
+                          <td
+                            colSpan={ROSTER_TABLE_COLSPAN}
+                            className="border-0 bg-neutral-50/50 p-0 dark:bg-neutral-950/30"
+                          />
+                        </tr>
+                      );
+                    }
+                    if (item.kind === "month-banner") {
+                      return (
+                        <tr
+                          key={item.key}
+                          className="border-b border-neutral-200 bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-800/90"
+                        >
+                          <td
+                            colSpan={ROSTER_TABLE_COLSPAN}
+                            className="px-2 py-1.5 text-center text-sm font-semibold tabular-nums tracking-tight text-neutral-800 dark:text-neutral-100"
+                          >
+                            {formatJapaneseYearMonth(item.yearMonth)}
+                          </td>
+                        </tr>
+                      );
+                    }
+                    const row = item.row;
                     const rowBg = rowBackgroundClass(row);
                     const stickyBg = stickyCellBgClass(row);
                     return (
-                      <tr key={row.date} className={rowBg}>
+                      <tr key={item.key} className={rowBg}>
                         <td
-                          className={`sticky left-0 z-10 whitespace-nowrap border-r border-neutral-200 px-2 py-1.5 font-mono tabular-nums dark:border-neutral-800 ${stickyBg}`}
+                          className={`sticky left-0 z-10 border-r border-neutral-200 px-1 py-0.5 align-middle dark:border-neutral-800 ${stickyBg}`}
                         >
-                          {row.date}
+                          <div className="mx-auto flex min-h-[2.5rem] w-[2.5rem] flex-col items-center justify-center gap-0 leading-none sm:w-10">
+                            <span className="text-sm font-semibold tabular-nums text-neutral-900 dark:text-neutral-100">
+                              {dayOfMonthLabel(row.date)}
+                            </span>
+                            <span className="mt-0.5 text-[11px] font-medium text-neutral-800 dark:text-neutral-200 sm:text-xs">
+                              {row.weekdayLabel}
+                            </span>
+                          </div>
                         </td>
-                        <td className="whitespace-nowrap px-2 py-1.5">{row.weekdayLabel}</td>
-                        <td className="whitespace-nowrap px-2 py-1.5 text-neutral-700 dark:text-neutral-300">
-                          {row.nationalHolidayColumnText}
-                        </td>
-                        <td className="max-w-[14rem] px-2 py-1.5 text-neutral-700 dark:text-neutral-300">
-                          {row.eventsAndNotes}
+                        <td className="w-[7em] min-w-[7em] max-w-[7em] px-1 py-0.5 align-middle text-neutral-700 dark:text-neutral-300">
+                          <div className="flex min-h-[2.5rem] items-center justify-center">
+                            <p
+                              className="line-clamp-2 w-full whitespace-pre-line break-words text-center text-[11px] leading-snug [writing-mode:horizontal-tb] sm:text-xs"
+                              title={rosterCombinedEventsText(row).replace(/\n/g, " / ")}
+                            >
+                              {rosterCombinedEventsText(row) || "\u00a0"}
+                            </p>
+                          </div>
                         </td>
                         {ROSTER_COLUMN_ORDER.map((name) => (
                           <td
                             key={name}
-                            className="min-w-[4.5rem] align-top px-2 py-1.5 text-center text-neutral-800 dark:text-neutral-200"
+                            className="min-w-[4.25rem] align-middle px-1 py-0.5 text-neutral-800 dark:text-neutral-200"
                           >
                             <DutyAndPreferenceCell name={name} row={row} />
                           </td>

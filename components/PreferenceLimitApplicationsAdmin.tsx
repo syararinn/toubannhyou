@@ -12,6 +12,7 @@ import {
   PREFERENCE_APPLICATIONS_UPDATED_EVENT,
   upsertPreferenceApplication,
 } from "@/lib/preferenceApplicationsStorage";
+import { applicationKindSummary } from "@/lib/preferenceApplicationKind";
 
 const btnPrimary =
   "inline-flex items-center justify-center rounded-lg bg-neutral-900 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-neutral-800 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-white";
@@ -26,30 +27,6 @@ function statusLabel(status: PreferenceLimitApplication["status"]): string {
   if (status === "pending") return "審査中";
   if (status === "approved") return "承認済み";
   return "却下";
-}
-
-/** 部員が記載した理由から、どちらの上限追加を求めているか（管理画面用） */
-function applicationKindSummary(app: PreferenceLimitApplication): {
-  restCross: boolean;
-  night: boolean;
-  shortLabel: string;
-} {
-  const rest = app.restCrossReason.trim().length > 0;
-  const night = app.nightReason.trim().length > 0;
-  if (rest && night) {
-    return { restCross: true, night: true, shortLabel: "休・✖・夜✖" };
-  }
-  if (rest) {
-    return { restCross: true, night: false, shortLabel: "休・✖" };
-  }
-  if (night) {
-    return { restCross: false, night: true, shortLabel: "夜✖" };
-  }
-  return {
-    restCross: false,
-    night: false,
-    shortLabel: "（理由文から区分不明）",
-  };
 }
 
 function ApplicationReviewCard({
@@ -70,6 +47,12 @@ function ApplicationReviewCard({
     setExtraNight(String(app.approvedExtraNight || 0));
   }, [app]);
 
+  const kind = applicationKindSummary(app);
+  /** 理由が両方空のときだけ両項目を出す（それ以外は申請のあった側のみ） */
+  const bothKindsUnknown = !kind.restCross && !kind.night;
+  const showRestPanel = kind.restCross || bothKindsUnknown;
+  const showNightPanel = kind.night || bothKindsUnknown;
+
   function parseExtra(raw: string, max: number): number | null {
     const n = Number(raw);
     if (!Number.isFinite(n) || n < 0 || n > max || !Number.isInteger(n)) return null;
@@ -77,20 +60,34 @@ function ApplicationReviewCard({
   }
 
   function approve() {
-    const r = parseExtra(extraRestCross, MAX_APPROVED_EXTRA_REST_CROSS_MARKS);
-    const n = parseExtra(extraNight, MAX_APPROVED_EXTRA_NIGHT_MARKS);
-    if (r === null || n === null) {
-      setError(
-        `追加枠は 0〜${MAX_APPROVED_EXTRA_REST_CROSS_MARKS} の整数で入力してください。`,
-      );
-      return;
+    let approvedRest = 0;
+    let approvedNight = 0;
+    if (showRestPanel) {
+      const parsed = parseExtra(extraRestCross, MAX_APPROVED_EXTRA_REST_CROSS_MARKS);
+      if (parsed === null) {
+        setError(
+          `休・✖ の加算は 0〜${MAX_APPROVED_EXTRA_REST_CROSS_MARKS} の整数で入力してください。`,
+        );
+        return;
+      }
+      approvedRest = parsed;
+    }
+    if (showNightPanel) {
+      const parsed = parseExtra(extraNight, MAX_APPROVED_EXTRA_NIGHT_MARKS);
+      if (parsed === null) {
+        setError(
+          `夜✖ の加算は 0〜${MAX_APPROVED_EXTRA_NIGHT_MARKS} の整数で入力してください。`,
+        );
+        return;
+      }
+      approvedNight = parsed;
     }
     setError(null);
     upsertPreferenceApplication({
       ...app,
       status: "approved",
-      approvedExtraRestCross: r,
-      approvedExtraNight: n,
+      approvedExtraRestCross: approvedRest,
+      approvedExtraNight: approvedNight,
       reviewedAt: new Date().toISOString(),
     });
     onUpdated();
@@ -115,13 +112,12 @@ function ApplicationReviewCard({
         ? "bg-emerald-100 text-emerald-950 dark:bg-emerald-950/50 dark:text-emerald-100"
         : "bg-red-100 text-red-950 dark:bg-red-950/50 dark:text-red-100";
 
-  const kind = applicationKindSummary(app);
   const badgeBase =
     "inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium";
   const badgeOn =
     "border-emerald-300 bg-emerald-100 text-emerald-950 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-100";
-  const badgeOff =
-    "border-neutral-200 bg-neutral-100 text-neutral-400 dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-500";
+
+  const showKindLine = bothKindsUnknown || (kind.restCross && kind.night);
 
   return (
     <li className="rounded-xl border border-neutral-200 p-4 dark:border-neutral-800">
@@ -137,22 +133,22 @@ function ApplicationReviewCard({
               : ""}
           </p>
           <div className="mt-2 flex flex-wrap items-center gap-2">
-            <span
-              className={`${badgeBase} ${kind.restCross ? badgeOn : badgeOff}`}
-              title={kind.restCross ? "この申請に休・✖ が含まれます" : "この申請に休・✖ は含まれません"}
-            >
-              休・✖
-            </span>
-            <span
-              className={`${badgeBase} ${kind.night ? badgeOn : badgeOff}`}
-              title={kind.night ? "この申請に夜✖ が含まれます" : "この申請に夜✖ は含まれません"}
-            >
-              夜✖
-            </span>
+            {showRestPanel ? (
+              <span className={`${badgeBase} ${badgeOn}`} title="休・✖">
+                休・✖
+              </span>
+            ) : null}
+            {showNightPanel ? (
+              <span className={`${badgeBase} ${badgeOn}`} title="夜✖">
+                夜✖
+              </span>
+            ) : null}
           </div>
-          <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
-            申請区分: {kind.shortLabel}
-          </p>
+          {showKindLine ? (
+            <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
+              申請区分: {kind.shortLabel}
+            </p>
+          ) : null}
         </div>
         <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${badge}`}>
           {statusLabel(app.status)}
@@ -161,22 +157,28 @@ function ApplicationReviewCard({
 
       <p className="mt-3 text-sm text-neutral-600 dark:text-neutral-400">
         申請時のマーク数{" "}
-        <span className="font-medium text-neutral-900 dark:text-neutral-100">
-          休・✖ {app.restCrossMarksAtSubmit} 件
-        </span>
-        <span className="mx-1.5 text-neutral-400">／</span>
-        <span className="font-medium text-neutral-900 dark:text-neutral-100">
-          夜✖ {app.nightMarksAtSubmit} 件
-        </span>
+        {showRestPanel ? (
+          <span className="font-medium text-neutral-900 dark:text-neutral-100">
+            休・✖ {app.restCrossMarksAtSubmit} 件
+          </span>
+        ) : null}
+        {showRestPanel && showNightPanel ? (
+          <span className="mx-1.5 text-neutral-400">／</span>
+        ) : null}
+        {showNightPanel ? (
+          <span className="font-medium text-neutral-900 dark:text-neutral-100">
+            夜✖ {app.nightMarksAtSubmit} 件
+          </span>
+        ) : null}
       </p>
 
-      {app.restCrossReason ? (
+      {app.restCrossReason && showRestPanel ? (
         <p className="mt-2 rounded-lg bg-neutral-50 px-3 py-2 text-sm text-neutral-800 dark:bg-neutral-900 dark:text-neutral-200">
           <span className="font-medium text-neutral-600 dark:text-neutral-400">休・✖</span>{" "}
           {app.restCrossReason}
         </p>
       ) : null}
-      {app.nightReason ? (
+      {app.nightReason && showNightPanel ? (
         <p className="mt-2 rounded-lg bg-neutral-50 px-3 py-2 text-sm text-neutral-800 dark:bg-neutral-900 dark:text-neutral-200">
           <span className="font-medium text-neutral-600 dark:text-neutral-400">夜✖</span>{" "}
           {app.nightReason}
@@ -188,35 +190,41 @@ function ApplicationReviewCard({
           <p className="text-sm font-medium text-neutral-800 dark:text-neutral-200">
             承認する加算（件）
           </p>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div>
-              <label className="block text-sm text-neutral-700 dark:text-neutral-300">
-                休・✖
-              </label>
-              <input
-                type="number"
-                min={0}
-                max={MAX_APPROVED_EXTRA_REST_CROSS_MARKS}
-                className={inputClass}
-                value={extraRestCross}
-                onChange={(e) => setExtraRestCross(e.target.value)}
-                title={`0〜${MAX_APPROVED_EXTRA_REST_CROSS_MARKS} の整数`}
-              />
-            </div>
-            <div>
-              <label className="block text-sm text-neutral-700 dark:text-neutral-300">
-                夜✖
-              </label>
-              <input
-                type="number"
-                min={0}
-                max={MAX_APPROVED_EXTRA_NIGHT_MARKS}
-                className={inputClass}
-                value={extraNight}
-                onChange={(e) => setExtraNight(e.target.value)}
-                title={`0〜${MAX_APPROVED_EXTRA_NIGHT_MARKS} の整数`}
-              />
-            </div>
+          <div
+            className={`grid gap-3 ${showRestPanel && showNightPanel ? "sm:grid-cols-2" : ""}`}
+          >
+            {showRestPanel ? (
+              <div>
+                <label className="block text-sm text-neutral-700 dark:text-neutral-300">
+                  休・✖
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  max={MAX_APPROVED_EXTRA_REST_CROSS_MARKS}
+                  className={inputClass}
+                  value={extraRestCross}
+                  onChange={(e) => setExtraRestCross(e.target.value)}
+                  title={`0〜${MAX_APPROVED_EXTRA_REST_CROSS_MARKS} の整数`}
+                />
+              </div>
+            ) : null}
+            {showNightPanel ? (
+              <div>
+                <label className="block text-sm text-neutral-700 dark:text-neutral-300">
+                  夜✖
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  max={MAX_APPROVED_EXTRA_NIGHT_MARKS}
+                  className={inputClass}
+                  value={extraNight}
+                  onChange={(e) => setExtraNight(e.target.value)}
+                  title={`0〜${MAX_APPROVED_EXTRA_NIGHT_MARKS} の整数`}
+                />
+              </div>
+            ) : null}
           </div>
           {error ? (
             <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200">
@@ -238,14 +246,18 @@ function ApplicationReviewCard({
             承認した加算
           </p>
           <dl className="mt-2 space-y-1 tabular-nums text-emerald-950 dark:text-emerald-100">
-            <div className="flex justify-between gap-4">
-              <dt className="text-neutral-600 dark:text-emerald-200/90">休・✖</dt>
-              <dd className="font-semibold">+{app.approvedExtraRestCross} 件</dd>
-            </div>
-            <div className="flex justify-between gap-4">
-              <dt className="text-neutral-600 dark:text-emerald-200/90">夜✖</dt>
-              <dd className="font-semibold">+{app.approvedExtraNight} 件</dd>
-            </div>
+            {showRestPanel ? (
+              <div className="flex justify-between gap-4">
+                <dt className="text-neutral-600 dark:text-emerald-200/90">休・✖</dt>
+                <dd className="font-semibold">+{app.approvedExtraRestCross} 件</dd>
+              </div>
+            ) : null}
+            {showNightPanel ? (
+              <div className="flex justify-between gap-4">
+                <dt className="text-neutral-600 dark:text-emerald-200/90">夜✖</dt>
+                <dd className="font-semibold">+{app.approvedExtraNight} 件</dd>
+              </div>
+            ) : null}
           </dl>
         </div>
       ) : (
