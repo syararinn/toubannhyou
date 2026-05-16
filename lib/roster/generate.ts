@@ -26,11 +26,12 @@ import {
   violatesInterval,
   violatesMorningHalfOnLateSlot,
 } from "./eligibility";
-import { holidayNameOn, JP_HOLIDAYS_2026 } from "./holidays";
+import { buildHolidayLookupMap, holidayNameOn } from "./holidays";
 import { applyCongressNominationCellLabels } from "./congress-nomination-display";
 import { applyGraphExclusiveIsobeCellLabel } from "./graph-exclusive-display";
 import { formatPreferenceMarksForDay } from "./preference-marks";
 import {
+  applyNewspaperWorkdayAssigneeCell,
   buildDemandSlotsForDate,
   buildEventsColumnText,
   type DemandSlot,
@@ -79,9 +80,10 @@ export interface UnfilledSlot {
 }
 
 function mergeHolidayMap(
+  admin: AdminSettings,
   extra?: Record<ISODateString, string>,
 ): Record<ISODateString, string> {
-  return { ...JP_HOLIDAYS_2026, ...extra };
+  return buildHolidayLookupMap(admin, extra);
 }
 
 function emptyCells(): Record<RosterColumnPerson, string> {
@@ -439,7 +441,7 @@ function generateRosterOnce(
   unfilled: UnfilledSlot[];
 } {
   const { admin, rangeStart, rangeEnd, preferencesByMember } = input;
-  const hol = mergeHolidayMap(input.holidaysExtra);
+  const hol = mergeHolidayMap(input.admin, input.holidaysExtra);
 
   const prefsMap: Record<DutyMember, PreferenceMap> = {} as Record<
     DutyMember,
@@ -522,24 +524,6 @@ function generateRosterOnce(
       }
 
       const basePool = DUTY_MEMBERS.filter((m) => {
-        if (isMemberExcludedGlobally(admin, m, date)) return false;
-        if (assignedToday[m] !== undefined) return false;
-        if (
-          (slot.kind === "早番" || slot.kind === "遅番") &&
-          isBlockedFromWeekdayEarlyLateDueToCongressNomination(admin, date, m, hol)
-        ) {
-          return false;
-        }
-        const flags = getFlags(prefsMap[m], date);
-        if (violatesHardPreference(flags, slot.kind, date, hol)) return false;
-        if (violatesInterval(slot.kind, yesterdayKind, m)) return false;
-        if (violatesMorningHalfOnLateSlot(flags, slot.kind)) return false;
-        return true;
-      });
-
-      let pool = basePool;
-      if (pool.length === 0) {
-        pool = DUTY_MEMBERS.filter((m) => {
           if (isMemberExcludedGlobally(admin, m, date)) return false;
           if (assignedToday[m] !== undefined) return false;
           if (
@@ -551,8 +535,26 @@ function generateRosterOnce(
           const flags = getFlags(prefsMap[m], date);
           if (violatesHardPreference(flags, slot.kind, date, hol)) return false;
           if (violatesInterval(slot.kind, yesterdayKind, m)) return false;
+          if (violatesMorningHalfOnLateSlot(flags, slot.kind)) return false;
           return true;
         });
+
+      let pool = basePool;
+      if (pool.length === 0) {
+        pool = DUTY_MEMBERS.filter((m) => {
+            if (isMemberExcludedGlobally(admin, m, date)) return false;
+            if (assignedToday[m] !== undefined) return false;
+            if (
+              (slot.kind === "早番" || slot.kind === "遅番") &&
+              isBlockedFromWeekdayEarlyLateDueToCongressNomination(admin, date, m, hol)
+            ) {
+              return false;
+            }
+            const flags = getFlags(prefsMap[m], date);
+            if (violatesHardPreference(flags, slot.kind, date, hol)) return false;
+            if (violatesInterval(slot.kind, yesterdayKind, m)) return false;
+            return true;
+          });
       }
 
       if (pool.length === 0) {
@@ -736,7 +738,7 @@ export function generateRoster(input: GenerateRosterInput): {
   days: GeneratedRosterDay[];
   unfilled: UnfilledSlot[];
 } {
-  const hol = mergeHolidayMap(input.holidaysExtra);
+  const hol = mergeHolidayMap(input.admin, input.holidaysExtra);
   let best: { days: GeneratedRosterDay[]; unfilled: UnfilledSlot[] } | null =
     null;
   let bestScore = Infinity;
@@ -792,5 +794,6 @@ function finalizeRowCells(
   }
   out = applyCongressNominationCellLabels(out, admin, date, prefsMap, hol);
   out = applyGraphExclusiveIsobeCellLabel(out, admin, date, prefsMap);
+  out = applyNewspaperWorkdayAssigneeCell(out, admin, date);
   return out;
 }

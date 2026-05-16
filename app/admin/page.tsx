@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type {
   AdminSettings,
   CongressWeeklyAssignment,
@@ -8,6 +8,8 @@ import type {
   DietSessionPeriod,
   DutyMember,
   LocalDateRange,
+  NationalHolidayManualEntry,
+  NewspaperNonPublicationAssignee,
   SecondmentStatus,
   WeekendHolidaySlotHeadcount,
   WeekdaySlotHeadcount,
@@ -15,14 +17,22 @@ import type {
 import { ROSTER_COLUMN_ORDER } from "@/types";
 import { PreferenceLimitApplicationsAdmin } from "@/components/PreferenceLimitApplicationsAdmin";
 import { PreferenceLimitPendingApprovalsStrip } from "@/components/PreferenceLimitPendingApprovalsStrip";
+import { AdminCollapsibleBlock } from "@/components/AdminCollapsibleBlock";
 import {
   loadAdminSettingsFromStorage,
   saveAdminSettingsToStorage,
 } from "@/lib/adminSettingsStorage";
+import { buildHolidayLookupMap, isSundayOrNationalHoliday } from "@/lib/roster/holidays";
 
 const DUTY_MEMBERS = ROSTER_COLUMN_ORDER.filter(
   (name): name is DutyMember => name !== "牛田" && name !== "倉科",
 );
+
+/** 新聞休刊作業日の出勤者ラジオ（部員7名＋倉科）。牛田は対象外。 */
+const NEWSPAPER_ASSIGNEE_RADIO_ORDER: readonly NewspaperNonPublicationAssignee[] = [
+  ...DUTY_MEMBERS,
+  "倉科",
+];
 
 function Section({
   title,
@@ -30,7 +40,7 @@ function Section({
   children,
 }: {
   title: string;
-  description?: string;
+  description?: ReactNode;
   children: React.ReactNode;
 }) {
   return (
@@ -39,9 +49,9 @@ function Section({
         {title}
       </h2>
       {description ? (
-        <p className="mt-1 text-sm text-neutral-600 dark:text-neutral-400">
+        <div className="mt-1 space-y-2 text-sm text-neutral-600 dark:text-neutral-400">
           {description}
-        </p>
+        </div>
       ) : null}
       <div className="mt-5 space-y-4">{children}</div>
     </section>
@@ -107,15 +117,26 @@ export default function AdminSettingsPage() {
   });
 
   const [newspaperDraft, setNewspaperDraft] = useState("");
+  const [newspaperAddError, setNewspaperAddError] = useState<string | null>(null);
 
   const [graphDraft, setGraphDraft] = useState<LocalDateRange>({
     start: "",
     end: "",
   });
 
-  const sortedNewspaperDates = useMemo(
-    () => [...settings.newspaperNonPublicationWorkDates].sort(),
-    [settings.newspaperNonPublicationWorkDates],
+  const sortedNewspaperDays = useMemo(
+    () => [...settings.newspaperNonPublicationWorkDays].sort((a, b) => a.date.localeCompare(b.date)),
+    [settings.newspaperNonPublicationWorkDays],
+  );
+
+  const holidayLookupMap = useMemo(() => buildHolidayLookupMap(settings), [settings]);
+
+  const sortedNationalHolidayRows = useMemo(
+    () =>
+      settings.nationalHolidaysManual
+        .map((row, index) => ({ row, index }))
+        .sort((a, b) => a.row.date.localeCompare(b.row.date)),
+    [settings.nationalHolidaysManual],
   );
 
   function addDietSession() {
@@ -141,16 +162,53 @@ export default function AdminSettingsPage() {
     }));
   }
 
+  function addNationalHolidayRow() {
+    const row: NationalHolidayManualEntry = { date: "", name: "" };
+    setSettings((s) => ({
+      ...s,
+      nationalHolidaysManual: [...s.nationalHolidaysManual, row],
+    }));
+  }
+
+  function updateNationalHolidayRow(
+    index: number,
+    patch: Partial<NationalHolidayManualEntry>,
+  ) {
+    setSettings((s) => ({
+      ...s,
+      nationalHolidaysManual: s.nationalHolidaysManual.map((row, i) =>
+        i === index ? { ...row, ...patch } : row,
+      ),
+    }));
+  }
+
+  function removeNationalHolidayRow(index: number) {
+    setSettings((s) => ({
+      ...s,
+      nationalHolidaysManual: s.nationalHolidaysManual.filter((_, i) => i !== index),
+    }));
+  }
+
   function addNewspaperDate() {
     const d = newspaperDraft.trim();
     if (!d) return;
-    if (settings.newspaperNonPublicationWorkDates.includes(d)) {
+    setNewspaperAddError(null);
+    if (!isSundayOrNationalHoliday(d, holidayLookupMap)) {
+      setNewspaperAddError(
+        "休刊作業日は日曜日または国民の祝日（振替休日を含む）のみ登録できます。平日は登録できません。",
+      );
+      return;
+    }
+    if (settings.newspaperNonPublicationWorkDays.some((x) => x.date === d)) {
       setNewspaperDraft("");
       return;
     }
     setSettings((s) => ({
       ...s,
-      newspaperNonPublicationWorkDates: [...s.newspaperNonPublicationWorkDates, d],
+      newspaperNonPublicationWorkDays: [
+        ...s.newspaperNonPublicationWorkDays,
+        { date: d, assignee: null },
+      ].sort((a, b) => a.date.localeCompare(b.date)),
     }));
     setNewspaperDraft("");
   }
@@ -158,8 +216,20 @@ export default function AdminSettingsPage() {
   function removeNewspaperDate(date: string) {
     setSettings((s) => ({
       ...s,
-      newspaperNonPublicationWorkDates: s.newspaperNonPublicationWorkDates.filter(
-        (x) => x !== date,
+      newspaperNonPublicationWorkDays: s.newspaperNonPublicationWorkDays.filter(
+        (x) => x.date !== date,
+      ),
+    }));
+  }
+
+  function setNewspaperAssignee(
+    date: string,
+    assignee: NewspaperNonPublicationAssignee | null,
+  ) {
+    setSettings((s) => ({
+      ...s,
+      newspaperNonPublicationWorkDays: s.newspaperNonPublicationWorkDays.map((row) =>
+        row.date !== date ? row : { ...row, assignee },
       ),
     }));
   }
@@ -365,8 +435,94 @@ export default function AdminSettingsPage() {
         </Section>
 
         <Section
+          title="国民の祝日（手動・上書き）"
+          description={
+            <>
+              <p>
+                アプリには <strong>2026年・2027年</strong> の祝日・休日（振替など）が同梱されています。2028年以降は内閣府の一覧に従い、ここに
+                <strong>日付と名称</strong>を追加してください（当番生成・休刊日登録の判定に使います）。
+                同じ日付が同梱データと重なる場合は、<strong>手動の行が優先</strong>されます。
+                出典:{" "}
+                <a
+                  href="https://www8.cao.go.jp/chosei/shukujitsu/gaiyou.html"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-neutral-900 underline underline-offset-2 hover:text-neutral-600 dark:text-neutral-100 dark:hover:text-neutral-300"
+                >
+                  国民の祝日について（内閣府）
+                </a>
+                。
+              </p>
+              <p className="text-xs text-neutral-500 dark:text-neutral-500">
+                行が増えたら一覧は折りたためます（開閉はこのブラウザに保存されます）。開いたときは一覧だけがスクロールし、ページ全体は伸びにくくなります。
+              </p>
+            </>
+          }
+        >
+          <button type="button" className={btnPrimary} onClick={addNationalHolidayRow}>
+            祝日の行を追加
+          </button>
+          {sortedNationalHolidayRows.length > 0 ? (
+            <AdminCollapsibleBlock
+              storageKey="duty-roster-admin-list-national-holidays"
+              summary={`登録済みの行（${sortedNationalHolidayRows.length}件）`}
+              itemCount={sortedNationalHolidayRows.length}
+              startClosedWhenCountGte={6}
+            >
+              <ul className="divide-y divide-neutral-200 dark:divide-neutral-800">
+                {sortedNationalHolidayRows.map(({ row, index }) => (
+                  <li
+                    key={`hol-${index}`}
+                    className="grid gap-3 bg-white px-3 py-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end dark:bg-neutral-950"
+                  >
+                    <div>
+                      <Label htmlFor={`hol-date-${index}`}>日付</Label>
+                      <input
+                        id={`hol-date-${index}`}
+                        type="date"
+                        className={inputClass}
+                        value={row.date}
+                        onChange={(e) =>
+                          updateNationalHolidayRow(index, { date: e.target.value })
+                        }
+                      />
+                    </div>
+                    <div>
+                      <Label htmlFor={`hol-name-${index}`}>名称（例: 元日、振替休日）</Label>
+                      <input
+                        id={`hol-name-${index}`}
+                        type="text"
+                        className={inputClass}
+                        placeholder="元日"
+                        value={row.name}
+                        onChange={(e) =>
+                          updateNationalHolidayRow(index, { name: e.target.value })
+                        }
+                      />
+                    </div>
+                    <div className="flex sm:justify-end">
+                      <button
+                        type="button"
+                        className={btnDanger}
+                        onClick={() => removeNationalHolidayRow(index)}
+                      >
+                        削除
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </AdminCollapsibleBlock>
+          ) : (
+            <p className="text-sm text-neutral-500 dark:text-neutral-500">
+              手動の祝日はまだありません。2028年以降を使う前に、内閣府の表から行を追加してください。
+            </p>
+          )}
+        </Section>
+
+        <Section
           title="新聞休刊作業日"
-          description="年間 10〜15 回程度を想定した休刊作業日を登録します。"
+          description="日曜または祝日のみ登録できます（平日は不可）。登録した日はメイン／予備などの自動当番は付けず、行事列には「新聞休刊作業日」のみ表示します。出勤者は部員7名または倉科から1名だけ選びます（未指定のままなら当番セルは空）。倉科が当番として「出勤」になるのは、原則としてこの指定がある日のみです。日付が増えたら一覧は折りたためます（開閉はこのブラウザに保存）。開いたときは一覧部分だけがスクロールします。"
         >
           <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
             <div className="flex-1">
@@ -376,32 +532,81 @@ export default function AdminSettingsPage() {
                 type="date"
                 className={inputClass}
                 value={newspaperDraft}
-                onChange={(e) => setNewspaperDraft(e.target.value)}
+                onChange={(e) => {
+                  setNewspaperAddError(null);
+                  setNewspaperDraft(e.target.value);
+                }}
               />
             </div>
             <button type="button" className={btnPrimary} onClick={addNewspaperDate}>
               追加
             </button>
           </div>
-          {sortedNewspaperDates.length > 0 ? (
-            <ul className="flex flex-wrap gap-2">
-              {sortedNewspaperDates.map((d) => (
-                <li
-                  key={d}
-                  className="inline-flex items-center gap-2 rounded-full border border-neutral-200 bg-neutral-50 px-3 py-1 text-sm dark:border-neutral-700 dark:bg-neutral-900"
-                >
-                  <span className="tabular-nums text-neutral-800 dark:text-neutral-200">{d}</span>
-                  <button
-                    type="button"
-                    className="text-neutral-500 hover:text-red-600 dark:hover:text-red-400"
-                    aria-label={`${d} を削除`}
-                    onClick={() => removeNewspaperDate(d)}
+          {newspaperAddError ? (
+            <p className="text-sm text-red-600 dark:text-red-400">{newspaperAddError}</p>
+          ) : null}
+          {sortedNewspaperDays.length > 0 ? (
+            <AdminCollapsibleBlock
+              storageKey="duty-roster-admin-list-newspaper-np"
+              summary={`登録済みの休刊作業日（${sortedNewspaperDays.length}件）`}
+              itemCount={sortedNewspaperDays.length}
+              startClosedWhenCountGte={5}
+            >
+              <ul className="space-y-3 pr-1">
+                {sortedNewspaperDays.map((row) => (
+                  <li
+                    key={row.date}
+                    className="rounded-xl border border-neutral-200 bg-white px-4 py-3 dark:border-neutral-800 dark:bg-neutral-950"
                   >
-                    ×
-                  </button>
-                </li>
-              ))}
-            </ul>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-mono text-sm font-medium tabular-nums text-neutral-900 dark:text-neutral-100">
+                        {row.date}
+                      </span>
+                      <button
+                        type="button"
+                        className={btnDanger}
+                        onClick={() => removeNewspaperDate(row.date)}
+                      >
+                        この日を削除
+                      </button>
+                    </div>
+                    <p className="mt-2 text-xs text-neutral-600 dark:text-neutral-400">
+                      出勤者は1名のみ。指定した人の列に「出勤」と表示します。
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setNewspaperAssignee(row.date, null)}
+                        className={`rounded-lg border px-2.5 py-1 text-xs font-medium transition ${
+                          row.assignee === null
+                            ? "border-neutral-900 bg-neutral-900 text-white dark:border-neutral-100 dark:bg-neutral-100 dark:text-neutral-900"
+                            : "border-neutral-300 bg-white text-neutral-700 hover:border-neutral-400 dark:border-neutral-600 dark:bg-neutral-900 dark:text-neutral-200 dark:hover:border-neutral-500"
+                        }`}
+                      >
+                        未指定
+                      </button>
+                      {NEWSPAPER_ASSIGNEE_RADIO_ORDER.map((member) => {
+                        const on = row.assignee === member;
+                        return (
+                          <button
+                            key={member}
+                            type="button"
+                            onClick={() => setNewspaperAssignee(row.date, member)}
+                            className={`rounded-lg border px-2.5 py-1 text-xs font-medium transition ${
+                              on
+                                ? "border-neutral-900 bg-neutral-900 text-white dark:border-neutral-100 dark:bg-neutral-100 dark:text-neutral-900"
+                                : "border-neutral-300 bg-white text-neutral-700 hover:border-neutral-400 dark:border-neutral-600 dark:bg-neutral-900 dark:text-neutral-200 dark:hover:border-neutral-500"
+                            }`}
+                          >
+                            {member}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </AdminCollapsibleBlock>
           ) : (
             <p className="text-sm text-neutral-500">まだ日付が追加されていません。</p>
           )}
@@ -612,7 +817,7 @@ export default function AdminSettingsPage() {
 
         <Section
           title="希望上限の申請（部長承認）"
-          description="部員が月あたり最大5回まで提出する申請です。休・✖ と夜✖ の追加枠は別々に 0〜30 件まで指定でき、承認分は同月内で加算されます。翌月は加算分はリセットされ、既定の3件から再開します。"
+          description="部員が月あたり最大5回まで提出する申請です。休・✖ と夜✖ の追加枠は別々に 0〜30 件まで指定でき、承認分は同月内で加算されます。翌月は加算分はリセットされ、既定の3件から再開します。処理済みの一覧は件数が増えると折りたたみ初期表示になります（開閉はこのブラウザに保存）。審査待ちが多いときはそのブロック内だけスクロールします。"
         >
           <PreferenceLimitApplicationsAdmin />
         </Section>

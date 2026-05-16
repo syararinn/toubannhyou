@@ -357,13 +357,14 @@ export default function MemberInputPage() {
               <h1 className="text-2xl font-semibold tracking-tight text-neutral-900 dark:text-neutral-50">
                 シフト希望の入力
               </h1>
-              <p className="mt-1 text-sm text-neutral-600 dark:text-neutral-400">
-                ご自身の氏名を選び、対象月の各日に希望を入力してください（現在はブラウザ内のみに保存されるモックです）。
-                国会当番（月／週）は、同一ブラウザで{" "}
-                <a href="/admin" className="font-medium text-neutral-900 underline dark:text-neutral-100">
-                  管理者設定
-                </a>{" "}
-                に登録された内容があれば、平日の行に表示されます。
+              <p className="mt-1 space-y-1 text-sm text-neutral-600 dark:text-neutral-400">
+                <span className="block">ご自身の氏名をクリックして選択してください。</span>
+                <span className="block">
+                  表示されるカレンダーに必要があれば「×」や「休み」などのチェックを入れて下さい。
+                </span>
+                <span className="block text-xs text-neutral-500 dark:text-neutral-400">
+                  ※国会当番やグラフなどの割り当ては、管理者が事前に設定しています。
+                </span>
               </p>
             </div>
             <button type="button" className={btnSecondary} onClick={() => setRulesOpen(true)}>

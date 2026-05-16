@@ -13,6 +13,7 @@ import {
   upsertPreferenceApplication,
 } from "@/lib/preferenceApplicationsStorage";
 import { applicationKindSummary } from "@/lib/preferenceApplicationKind";
+import { AdminCollapsibleBlock } from "@/components/AdminCollapsibleBlock";
 
 const btnPrimary =
   "inline-flex items-center justify-center rounded-lg bg-neutral-900 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-neutral-800 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-white";
@@ -273,16 +274,31 @@ function ApplicationList({
   title,
   apps,
   onUpdated,
+  listClassName,
 }: {
   title: string;
   apps: PreferenceLimitApplication[];
   onUpdated: () => void;
+  /** 未指定時は「審査待ち」以外に上マージンを付ける */
+  listClassName?: string;
 }) {
   if (apps.length === 0) return null;
+  const topMargin =
+    listClassName !== undefined
+      ? listClassName
+      : title === "審査待ち"
+        ? ""
+        : "mt-8";
   return (
-    <div className={title === "審査待ち" ? "" : "mt-8"}>
+    <div className={topMargin}>
       <h3 className="text-sm font-semibold text-neutral-800 dark:text-neutral-200">{title}</h3>
-      <ul className="mt-3 space-y-4">
+      <ul
+        className={`mt-3 space-y-4 ${
+          title === "審査待ち" && apps.length > 4
+            ? "max-h-[min(24rem,50vh)] overflow-y-auto overscroll-y-contain pr-1"
+            : ""
+        }`}
+      >
         {apps.map((app) => (
           <ApplicationReviewCard
             key={app.id}
@@ -323,7 +339,21 @@ export function PreferenceLimitApplicationsAdmin() {
       ) : (
         <p className="text-sm text-neutral-500">審査待ちの申請はありません。</p>
       )}
-      <ApplicationList title="処理済み" apps={others} onUpdated={() => setTick((t) => t + 1)} />
+      {others.length > 0 ? (
+        <AdminCollapsibleBlock
+          storageKey="duty-roster-admin-list-pref-limit-reviewed"
+          summary={`処理済みの申請（${others.length}件）`}
+          itemCount={others.length}
+          startClosedWhenCountGte={4}
+        >
+          <ApplicationList
+            title="処理済み"
+            apps={others}
+            listClassName=""
+            onUpdated={() => setTick((t) => t + 1)}
+          />
+        </AdminCollapsibleBlock>
+      ) : null}
     </>
   );
 }

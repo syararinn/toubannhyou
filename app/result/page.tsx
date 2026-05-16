@@ -20,6 +20,10 @@ import { DEMO_ROSTER_RANGE, demoAdminSettings, demoPreferencesByMember } from "@
 import { compareIso } from "@/lib/roster/dates";
 import { generateRoster, type UnfilledSlot } from "@/lib/roster/generate";
 import { formatRosterDutyCellText } from "@/lib/roster/roster-cell-display";
+import {
+  dayOfMonthLabel,
+  rosterCombinedEventsText,
+} from "@/lib/roster/roster-table-columns";
 
 function pad2(n: number): string {
   return n < 10 ? `0${n}` : String(n);
@@ -54,7 +58,11 @@ function validateGenerateRange(
 }
 
 const ROSTER_TABLE_COLSPAN =
-  2 + ROSTER_COLUMN_ORDER.length;
+  3 + ROSTER_COLUMN_ORDER.length;
+
+/** 当番表のセル罫線（グレー） */
+const rosterTableCellBorder =
+  "border border-neutral-300 dark:border-neutral-600";
 
 function yearMonthKey(iso: ISODateString): string {
   return iso.slice(0, 7);
@@ -65,12 +73,6 @@ function formatJapaneseYearMonth(ym: string): string {
   const [y, m] = ym.split("-").map((s) => parseInt(s, 10));
   if (!Number.isFinite(y) || !Number.isFinite(m)) return ym;
   return `${y}年${m}月`;
-}
-
-/** ISO 日付から「日」欄用（月は別行で表示するため日のみ） */
-function dayOfMonthLabel(iso: ISODateString): string {
-  const d = parseInt(iso.slice(8, 10), 10);
-  return Number.isFinite(d) ? String(d) : iso.slice(8);
 }
 
 type RosterTableBodyItem =
@@ -121,12 +123,12 @@ function isPastelPinkRestDayRow(row: GeneratedRosterDay): boolean {
 /** 日曜・祝日行は薄いピンク、土曜は薄いグリーン（土曜を優先） */
 function rowBackgroundClass(row: GeneratedRosterDay): string {
   if (isSaturdayRow(row)) {
-    return "border-b border-neutral-100 bg-green-50/95 dark:border-neutral-800/80 dark:bg-green-950/35";
+    return "bg-green-50/95 dark:bg-green-950/35";
   }
   if (isPastelPinkRestDayRow(row)) {
-    return "border-b border-neutral-100 bg-pink-50/95 dark:border-neutral-800/80 dark:bg-pink-950/35";
+    return "bg-pink-50/95 dark:bg-pink-950/35";
   }
-  return "border-b border-neutral-100 odd:bg-white even:bg-neutral-50/80 dark:border-neutral-800/80 dark:odd:bg-neutral-950 dark:even:bg-neutral-900/40";
+  return "odd:bg-white even:bg-neutral-50/80 dark:odd:bg-neutral-950 dark:even:bg-neutral-900/40";
 }
 
 function stickyCellBgClass(row: GeneratedRosterDay): string {
@@ -137,17 +139,6 @@ function stickyCellBgClass(row: GeneratedRosterDay): string {
     return "bg-pink-50/95 dark:bg-pink-950/35";
   }
   return "bg-inherit";
-}
-
-/** 行事列用：行事予定と祭日（A列では省略）をまとめて表示。重複は1つに。 */
-function rosterCombinedEventsText(row: GeneratedRosterDay): string {
-  const ev = row.eventsAndNotes?.trim() ?? "";
-  const hol = row.nationalHolidayColumnText?.trim() ?? "";
-  if (!ev) return hol;
-  if (!hol) return ev;
-  if (ev === hol || ev.includes(hol)) return ev;
-  if (hol.includes(ev)) return hol;
-  return `${ev}\n${hol}`;
 }
 
 /** 早番＝濃い青、遅番＝赤 */
@@ -492,25 +483,34 @@ export default function ResultPage() {
         {days && days.length > 0 ? (
           <Section
             title="当番表"
-            description="左端は日と曜日のみ（祭日は行事列に統合）。行事列は横書き・約7文字幅で最大2行。各行の高さは行事列の2行分で揃え、全セルを左右・上下中央に配置します。"
+            description="A列＝日、B列＝曜日、C列＝行事（祭日を統合）、D列以降＝管理職列（定義の並びに追従し、人数・列数は変更可能）。罫線はグレーです。"
           >
             <div className="overflow-x-auto rounded-xl border border-neutral-200 dark:border-neutral-800">
-              <table className="min-w-[1000px] w-full border-collapse text-center text-xs sm:text-sm">
+              <table
+                className={`min-w-[1000px] w-full border-collapse text-center text-xs sm:text-sm ${rosterTableCellBorder}`}
+              >
                 <thead>
-                  <tr className="border-b border-neutral-200 bg-neutral-50 dark:border-neutral-800 dark:bg-neutral-900/50">
-                    <th className="sticky left-0 z-10 border-r border-neutral-200 bg-neutral-50 px-1 py-1 align-middle dark:border-neutral-800 dark:bg-neutral-900/90">
-                      <div className="flex flex-col items-center justify-center gap-0 leading-tight">
-                        <span>日</span>
-                        <span className="text-[10px] font-normal text-neutral-600 dark:text-neutral-400">
-                          曜日
-                        </span>
-                      </div>
+                  <tr className="bg-neutral-50 dark:bg-neutral-900/50">
+                    <th
+                      className={`sticky left-0 z-[5] w-10 min-w-[2.5rem] bg-neutral-50 px-1 py-1 align-middle dark:bg-neutral-900/90 ${rosterTableCellBorder}`}
+                    >
+                      日
                     </th>
-                    <th className="w-[7em] min-w-[7em] max-w-[7em] px-1 py-1 align-middle font-medium">
-                      行事予定
+                    <th
+                      className={`sticky left-10 z-[4] w-10 min-w-[2.5rem] bg-neutral-50 px-1 py-1 align-middle font-medium dark:bg-neutral-900/90 ${rosterTableCellBorder}`}
+                    >
+                      曜日
+                    </th>
+                    <th
+                      className={`sticky left-20 z-[3] w-[7em] min-w-[7em] max-w-[7em] bg-neutral-50 px-1 py-1 align-middle font-medium dark:bg-neutral-900/90 ${rosterTableCellBorder}`}
+                    >
+                      行事
                     </th>
                     {ROSTER_COLUMN_ORDER.map((name) => (
-                      <th key={name} className="whitespace-nowrap px-1 py-1 align-middle font-medium">
+                      <th
+                        key={name}
+                        className={`whitespace-nowrap px-1 py-1 align-middle font-medium ${rosterTableCellBorder}`}
+                      >
                         {name}
                       </th>
                     ))}
@@ -523,7 +523,7 @@ export default function ResultPage() {
                         <tr key={item.key} aria-hidden className="h-2">
                           <td
                             colSpan={ROSTER_TABLE_COLSPAN}
-                            className="border-0 bg-neutral-50/50 p-0 dark:bg-neutral-950/30"
+                            className="border-x border-neutral-300 bg-neutral-50/50 p-0 dark:border-neutral-600 dark:bg-neutral-950/30"
                           />
                         </tr>
                       );
@@ -532,11 +532,11 @@ export default function ResultPage() {
                       return (
                         <tr
                           key={item.key}
-                          className="border-b border-neutral-200 bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-800/90"
+                          className="bg-neutral-100 dark:bg-neutral-800/90"
                         >
                           <td
                             colSpan={ROSTER_TABLE_COLSPAN}
-                            className="px-2 py-1.5 text-center text-sm font-semibold tabular-nums tracking-tight text-neutral-800 dark:text-neutral-100"
+                            className={`px-2 py-1.5 text-center text-sm font-semibold tabular-nums tracking-tight text-neutral-800 dark:text-neutral-100 ${rosterTableCellBorder}`}
                           >
                             {formatJapaneseYearMonth(item.yearMonth)}
                           </td>
@@ -549,18 +549,26 @@ export default function ResultPage() {
                     return (
                       <tr key={item.key} className={rowBg}>
                         <td
-                          className={`sticky left-0 z-10 border-r border-neutral-200 px-1 py-0.5 align-middle dark:border-neutral-800 ${stickyBg}`}
+                          className={`sticky left-0 z-[5] w-10 min-w-[2.5rem] px-1 py-0.5 align-middle ${stickyBg} ${rosterTableCellBorder}`}
                         >
-                          <div className="mx-auto flex min-h-[2.5rem] w-[2.5rem] flex-col items-center justify-center gap-0 leading-none sm:w-10">
+                          <div className="mx-auto flex min-h-[2.5rem] items-center justify-center">
                             <span className="text-sm font-semibold tabular-nums text-neutral-900 dark:text-neutral-100">
                               {dayOfMonthLabel(row.date)}
                             </span>
-                            <span className="mt-0.5 text-[11px] font-medium text-neutral-800 dark:text-neutral-200 sm:text-xs">
+                          </div>
+                        </td>
+                        <td
+                          className={`sticky left-10 z-[4] w-10 min-w-[2.5rem] px-1 py-0.5 align-middle text-neutral-900 dark:text-neutral-100 ${stickyBg} ${rosterTableCellBorder}`}
+                        >
+                          <div className="flex min-h-[2.5rem] items-center justify-center">
+                            <span className="text-[11px] font-semibold leading-none sm:text-xs">
                               {row.weekdayLabel}
                             </span>
                           </div>
                         </td>
-                        <td className="w-[7em] min-w-[7em] max-w-[7em] px-1 py-0.5 align-middle text-neutral-700 dark:text-neutral-300">
+                        <td
+                          className={`sticky left-20 z-[3] w-[7em] min-w-[7em] max-w-[7em] px-1 py-0.5 align-middle text-neutral-700 dark:text-neutral-300 ${stickyBg} ${rosterTableCellBorder}`}
+                        >
                           <div className="flex min-h-[2.5rem] items-center justify-center">
                             <p
                               className="line-clamp-2 w-full whitespace-pre-line break-words text-center text-[11px] leading-snug [writing-mode:horizontal-tb] sm:text-xs"
@@ -573,7 +581,7 @@ export default function ResultPage() {
                         {ROSTER_COLUMN_ORDER.map((name) => (
                           <td
                             key={name}
-                            className="min-w-[4.25rem] align-middle px-1 py-0.5 text-neutral-800 dark:text-neutral-200"
+                            className={`min-w-[4.25rem] align-middle px-1 py-0.5 text-neutral-800 dark:text-neutral-200 ${rosterTableCellBorder}`}
                           >
                             <DutyAndPreferenceCell name={name} row={row} />
                           </td>

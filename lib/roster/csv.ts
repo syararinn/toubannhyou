@@ -1,6 +1,10 @@
 import type { GeneratedRosterDay } from "@/types";
 import { ROSTER_COLUMN_ORDER } from "@/types";
 import { formatRosterDutyCellText } from "./roster-cell-display";
+import {
+  dayOfMonthLabel,
+  rosterCombinedEventsText,
+} from "./roster-table-columns";
 
 function csvEscapeCell(value: string): string {
   if (/[",\r\n]/.test(value)) {
@@ -9,13 +13,13 @@ function csvEscapeCell(value: string): string {
   return value;
 }
 
-/** A〜M 列に対応する CSV（RFC 4180 風、Excel 向けに CRLF） */
+/** 表 A〜C 列＋管理職列に対応する CSV（RFC 4180 風、Excel 向けに CRLF）。管理職列数は `ROSTER_COLUMN_ORDER` に追従 */
 export function rosterDaysToCsv(rows: GeneratedRosterDay[]): string {
   const header = [
     "日付",
+    "日",
     "曜日",
-    "祭日",
-    "行事予定",
+    "行事",
     ...([...ROSTER_COLUMN_ORDER] as string[]),
   ];
   const lines: string[] = [header.map(csvEscapeCell).join(",")];
@@ -33,9 +37,9 @@ export function rosterDaysToCsv(rows: GeneratedRosterDay[]): string {
     lines.push(
       [
         row.date,
+        dayOfMonthLabel(row.date),
         row.weekdayLabel,
-        row.nationalHolidayColumnText,
-        row.eventsAndNotes,
+        rosterCombinedEventsText(row),
         ...cells,
       ]
         .map(csvEscapeCell)

@@ -177,7 +177,13 @@ export function PreferenceLimitPendingApprovalsStrip() {
       <p className="text-xs font-semibold text-amber-950 dark:text-amber-100">
         承認待ちの希望上限申請（{pending.length}）
       </p>
-      <ul className="mt-1 divide-y divide-amber-200/60 dark:divide-amber-900/50">
+      <ul
+        className={`mt-1 divide-y divide-amber-200/60 dark:divide-amber-900/50 ${
+          pending.length > 4
+            ? "max-h-[min(11rem,42vh)] overflow-y-auto overscroll-y-contain pr-0.5"
+            : ""
+        }`}
+      >
         {pending.map((app) => (
           <CompactPendingRow key={app.id} app={app} onUpdated={() => setTick((t) => t + 1)} />
         ))}

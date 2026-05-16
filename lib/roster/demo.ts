@@ -12,7 +12,11 @@ export function demoAdminSettings(): AdminSettings {
     dietSessions: [
       { start: "2026-01-06", end: "2026-01-31", label: "常会（デモ）" },
     ],
-    newspaperNonPublicationWorkDates: ["2026-01-11", "2026-01-25"],
+    nationalHolidaysManual: [],
+    newspaperNonPublicationWorkDays: [
+      { date: "2026-01-11", assignee: null },
+      { date: "2026-01-25", assignee: "磯田" },
+    ],
     graphExclusivePeriodsForIsobe: [
       { start: "2026-01-18", end: "2026-01-22" },
     ],

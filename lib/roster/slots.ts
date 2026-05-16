@@ -3,6 +3,8 @@ import type {
   DailyAttendanceHeadcountOverride,
   DutyMember,
   ISODateString,
+  NewspaperNonPublicationWorkDay,
+  RosterColumnPerson,
 } from "@/types";
 import { mondayBasedWeekIndexInMonth, yearMonthFromIso } from "./congress-week";
 import { eachDateInclusive, isSaturday, isSunday, isWeekdayMonFri, parseISODate } from "./dates";
@@ -103,11 +105,36 @@ export function weekBlockIntersectsDietSession(
   return false;
 }
 
+export function getNewspaperWorkDay(
+  admin: AdminSettings,
+  date: ISODateString,
+): NewspaperNonPublicationWorkDay | undefined {
+  return admin.newspaperNonPublicationWorkDays.find((d) => d.date === date);
+}
+
 export function isNewspaperNonPublicationDay(
   admin: AdminSettings,
   date: ISODateString,
 ): boolean {
-  return admin.newspaperNonPublicationWorkDates.includes(date);
+  return getNewspaperWorkDay(admin, date) !== undefined;
+}
+
+/** 新聞休刊作業日の出勤セルに印字する文言 */
+export const NEWSPAPER_WORKDAY_CELL_LABEL = "出勤";
+
+/**
+ * 休刊作業日に 1 名だけ指定されている場合、その人の列に「出勤」を出す（行事列には名前を出さない）。
+ */
+export function applyNewspaperWorkdayAssigneeCell(
+  draft: Record<RosterColumnPerson, string>,
+  admin: AdminSettings,
+  date: ISODateString,
+): Record<RosterColumnPerson, string> {
+  const row = getNewspaperWorkDay(admin, date);
+  if (!row?.assignee) return draft;
+  const out = { ...draft };
+  out[row.assignee] = NEWSPAPER_WORKDAY_CELL_LABEL;
+  return out;
 }
 
 export function isGraphExclusiveForIsobe(admin: AdminSettings, date: ISODateString): boolean {
@@ -129,13 +156,14 @@ export function buildDemandSlotsForDate(
   const hol = holidayNameOn(date, holidayExtra);
   const isHol = Boolean(hol);
 
-  if (isSunday(date) || isHol) {
-    const np = isNewspaperNonPublicationDay(admin, date);
-    const reduceReserve = np && (isSunday(date) || isHol);
+  /** 休刊作業日は自動当番（メイン／予備等）を出さない。出勤は管理者指定の 1 名のみ。 */
+  if (isNewspaperNonPublicationDay(admin, date)) {
+    return [];
+  }
 
+  if (isSunday(date) || isHol) {
     const mainN = ov?.weekendHolidaySlots?.sundayOrHolidayMain ?? 1;
-    const resN =
-      ov?.weekendHolidaySlots?.sundayOrHolidayReserve ?? (reduceReserve ? 0 : 1);
+    const resN = ov?.weekendHolidaySlots?.sundayOrHolidayReserve ?? 1;
 
     for (let i = 0; i < mainN; i++) {
       slots.push({ id: `main-${i}`, kind: "メイン" });
@@ -191,7 +219,7 @@ export function buildDemandSlotsForDate(
   return slots;
 }
 
-/** D 列（行事予定）。国会会期・グラフ専任はセルに出さず、当番割当／磯田列で表現する。 */
+/** 行事（表では C 列に統合表示）。国会会期・グラフ専任はセルに出さず、当番割当／磯田列で表現する。 */
 export function buildEventsColumnText(
   admin: AdminSettings,
   date: ISODateString,
@@ -200,6 +228,8 @@ export function buildEventsColumnText(
   const parts: string[] = [];
   const hol = holidayNameOn(date, holidayExtra);
   if (hol) parts.push(hol);
-  if (isNewspaperNonPublicationDay(admin, date)) parts.push("新聞休刊作業日");
+  if (getNewspaperWorkDay(admin, date)) {
+    parts.push("新聞休刊作業日");
+  }
   return parts.join("／");
 }
