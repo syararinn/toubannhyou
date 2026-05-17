@@ -8,10 +8,10 @@ import { isSaturday, isSunday } from "./dates";
 import { holidayNameOn } from "./holidays";
 import type { DutySlotKind } from "./slots";
 import {
+  isAdminNominatedCongressDutyKind,
   isCongressSlotKind,
   isGraphExclusiveForIsobe,
   slotIsEarlyLike,
-  slotIsLateLike,
 } from "./slots";
 
 export type PreferenceMap = Record<ISODateString, MemberDayPreferenceFlags>;
@@ -67,10 +67,18 @@ function isHolidayAttendanceMainForNight(
   return isSaturday(date) || isSunday(date) || Boolean(holidayNameOn(date, holidayExtra));
 }
 
+/** 午後半休がハードで不可になる枠（国会月番・週番・無印「国会」は指名枠のため除外し、応援のみ国会系として扱う） */
+function afternoonHalfOffBlocksSlotKind(kind: DutySlotKind): boolean {
+  if (kind === "遅番" || kind === "予備") return true;
+  if (isCongressSlotKind(kind) && !isAdminNominatedCongressDutyKind(kind)) return true;
+  return false;
+}
+
 /**
  * 休・✖️: いかなる枠にも不可。
- * 午後半休: 「遅番側」相当（遅番・予備・国会系）には不可。
- * 夜✖️: 遅番と休日出勤（土日祝のメイン枠）のみ不可。国会・平日の予備（現行では未使用）・休日の予備はハードでは可。
+ * 午前半休: 早番・メイン（午前出勤が前提の枠）には不可。国会月番・週番・国会（指名枠）は可（半休時の人手は別途「国会（応援）」枠で補う）。
+ * 午後半休: 遅番・予備・国会（応援）には不可。国会月番・週番・国会（指名枠）は可。
+ * 夜✖️: 遅番と休日出勤（土日祝のメイン枠）のみ不可。
  */
 export function violatesHardPreference(
   flags: MemberDayPreferenceFlags,
@@ -79,9 +87,8 @@ export function violatesHardPreference(
   holidayExtra: Record<ISODateString, string>,
 ): boolean {
   if (flags.fullDayOff || flags.fullyUnavailable) return true;
-  if (slotIsLateLike(kind)) {
-    if (flags.afternoonHalfOff) return true;
-  }
+  if (flags.morningHalfOff && slotIsEarlyLike(kind)) return true;
+  if (flags.afternoonHalfOff && afternoonHalfOffBlocksSlotKind(kind)) return true;
   if (flags.nightUnavailable) {
     if (kind === "遅番") return true;
     if (isHolidayAttendanceMainForNight(kind, date, holidayExtra)) return true;

@@ -40,7 +40,14 @@ import {
   type PreferenceToggleKey,
 } from "@/lib/preferenceLimits";
 import { getMemberCongressDutyLabels } from "@/lib/roster/congress-member-notice";
-import { buildHolidayLookupMap } from "@/lib/roster/holidays";
+import {
+  DAILY_DEMAND_FEASIBILITY_BLOCK_MESSAGE,
+  PERSONNEL_TIGHT_MESSAGE,
+  dailyDemandFeasibleFromStore,
+  isWeekdayPersonnelTightButFeasibleFromStore,
+  preferenceOnWouldBreakDailyDemand,
+} from "@/lib/roster/daily-demand-feasibility";
+import { buildHolidayLookupMap, isSundayOrNationalHoliday } from "@/lib/roster/holidays";
 import { DEFAULT_HALF_DAY_MARKS_PER_MONTH } from "@/types";
 
 const DUTY_MEMBERS = ROSTER_COLUMN_ORDER.filter(
@@ -64,29 +71,6 @@ function listDatesInMonth(year: number, month0: number): ISODateString[] {
     out.push(toISODate(year, month0, d));
   }
   return out;
-}
-
-/** 他部員の「休・✖」希望件数のモック（日付に依存する固定乱数）。API 接続時はサーバ集計に差し替え */
-function mockOtherMembersHardOffCount(date: ISODateString): number {
-  let h = 0;
-  const s = `${date}|peer-mock-v1`;
-  for (let i = 0; i < s.length; i++) {
-    h = (Math.imul(h, 31) + s.charCodeAt(i)) | 0;
-  }
-  return Math.abs(h) % 7;
-}
-
-/**
- * 平日は早番・遅番で最低 2 名が必要なため、
- * 「休・✖」希望が多すぎる日は配置不能に近いとみなして警告する。
- */
-function isHighCongestionRisk(
-  date: ISODateString,
-  flags: MemberDayPreferenceFlags,
-): boolean {
-  const userHard = flags.fullDayOff || flags.fullyUnavailable ? 1 : 0;
-  const peers = mockOtherMembersHardOffCount(date);
-  return peers + userHard >= 6;
 }
 
 function Section({
@@ -124,7 +108,7 @@ const AI_RULES_PUBLIC_TEXT = [
   "毎週（月曜始まり）、当番の回数が可能な限り均等になるよう調整します（国会当番・グラフ専任・出向者は対象外）。",
   "AIとして要件定義に基づき極限まで均等化を目指し計算し直します。",
   "ご入力いただいた希望は可能な範囲で尊重しますが、全体の制約を満たす必要があるため、すべてが通るとは限りません。",
-  "「休」「✖️」はその日の当番を希望しないものです。「夜✖️」は遅番と休日の出勤（土曜のメイン、日曜・国民の祝日・振替休日などのメイン枠）を希望しないものです。早番は可で、休日の予備は原則避けますが、どうしても人手が足りないときのみ割り当て得ます。",
+  "「休」「✖️」はその日の当番を希望しないものです。「午前半休」は早番・休日のメイン出勤には割り当てません。国会月番・週番の指名は半休があっても維持し、その日の国会（応援）枠で人手を補います。「夜✖️」は遅番と休日の出勤（土曜のメイン、日曜・国民の祝日・振替休日などのメイン枠）を希望しないものですが、同日の早番には入り得ます。休日の予備は原則避けますが、どうしても人手が足りないときのみ割り当て得ます。",
   "原則として、遅番の翌日は早番には入りません。他に配置できる人がいない場合のみ早番になることがあります。",
   "日曜・祝日にメイン出勤した方の翌日は、原則として早番には入りません。他に配置できる人がいない場合のみ早番になることがあります。",
   "土曜・日曜・祝日の出勤は、原則として休日の連続出勤にはしません。他に配置できる人がいない場合のみ、休日が続いても出勤になることがあります。",
@@ -233,6 +217,27 @@ export default function MemberInputPage() {
 
   const monthDates = useMemo(() => listDatesInMonth(year, month0), [year, month0]);
 
+  const demandInfeasibleByDate = useMemo(() => {
+    const m: Record<string, boolean> = {};
+    for (const d of monthDates) {
+      m[d] = !dailyDemandFeasibleFromStore(adminSnapshot, d, holidayLookupMap, prefsByMember);
+    }
+    return m;
+  }, [monthDates, adminSnapshot, holidayLookupMap, prefsByMember]);
+
+  const personnelTightByDate = useMemo(() => {
+    const m: Record<string, boolean> = {};
+    for (const d of monthDates) {
+      m[d] = isWeekdayPersonnelTightButFeasibleFromStore(
+        adminSnapshot,
+        d,
+        holidayLookupMap,
+        prefsByMember,
+      );
+    }
+    return m;
+  }, [monthDates, adminSnapshot, holidayLookupMap, prefsByMember]);
+
   const leadingBlanks = useMemo(() => {
     const first = new Date(year, month0, 1).getDay();
     return first;
@@ -327,6 +332,21 @@ export default function MemberInputPage() {
       }
       return;
     }
+    if (checked && selectedMember) {
+      const demandMsg = preferenceOnWouldBreakDailyDemand(
+        adminSnapshot,
+        holidayLookupMap,
+        prefsByMember,
+        selectedMember,
+        date,
+        key,
+        merged,
+      );
+      if (demandMsg) {
+        setCapBlockMessage(demandMsg);
+        return;
+      }
+    }
     setFlag(date, merged);
   }
 
@@ -416,7 +436,7 @@ export default function MemberInputPage() {
           <>
             <Section
               title={`希望入力（${monthTitle()}・${selectedMember}）`}
-              description="各日について「休」「✖️」「午前半休」「午後半休」「夜✖️」から該当するものにチェックを入れます。休・✖️は他の全日系・半休と同時には選べません。同日に午前半休と午後半休、または午前半休と夜✖を両方選ぶことはできません。夜✖は遅番と休日の出勤（土日祝のメイン枠）には入りませんが、早番には入る場合があります。平日で国会当番に指定されている日は行の色と「注意」欄でお知らせします。"
+              description="各日について「休」「✖️」「午前半休」「午後半休」「夜✖️」から該当するものにチェックを入れます。休・✖️は他の全日系・半休と同時には選べません。同日に午前半休と午後半休、または午前半休と夜✖を両方選ぶことはできません。午前半休の日は早番・休日のメイン出勤には入りません。国会月番・週番に指名されている日でも半休は選べます（当番表では応援枠で補います）。夜✖は遅番と休日の出勤（土日祝のメイン枠）には入りませんが、早番には入る場合があります。平日で国会当番に指定されている日は行の色と「注意」欄でお知らせします。当番の需要（平日は早番・遅番・国会［応援含む］、土日祝はメイン・予備の人数）を満たせなくなる操作はチェックできません（判定には同一ブラウザに保存された全員分の希望が使われます）。"
             >
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
@@ -500,22 +520,32 @@ export default function MemberInputPage() {
 
               {viewMode === "calendar" ? (
                 <div className="overflow-x-auto">
-                  <div className="grid min-w-[280px] grid-cols-7 gap-1 text-center text-xs font-medium text-neutral-500 dark:text-neutral-400">
-                    {WEEKDAY_JA.map((w) => (
-                      <div key={w} className="py-2">
-                        {w}
+                  <div className="max-h-[min(70vh,36rem)] min-w-[280px] overflow-y-auto overscroll-y-contain rounded-lg border border-neutral-200 dark:border-neutral-800">
+                    <div className="sticky top-0 z-10 border-b border-neutral-200 bg-neutral-50/95 px-1 pb-1 pt-1 backdrop-blur dark:border-neutral-700 dark:bg-neutral-950/95">
+                      <div className="grid min-w-[280px] grid-cols-7 gap-1 text-center text-xs font-medium text-neutral-500 dark:text-neutral-400">
+                        {WEEKDAY_JA.map((w) => (
+                          <div key={w} className="py-2">
+                            {w}
+                          </div>
+                        ))}
                       </div>
-                    ))}
-                  </div>
-                  <div className="grid min-w-[280px] grid-cols-7 gap-1">
-                    {Array.from({ length: leadingBlanks }).map((_, i) => (
-                      <div key={`blank-${i}`} className="aspect-square" />
-                    ))}
+                    </div>
+                    <div className="grid min-w-[280px] grid-cols-7 gap-1 px-1 pb-2 pt-1">
+                      {Array.from({ length: leadingBlanks }).map((_, i) => (
+                        <div key={`blank-${i}`} className="aspect-square" />
+                      ))}
                     {monthDates.map((date) => {
                       const d = Number(date.slice(8, 10));
                       const f = flagsByDate[date];
-                      const congested = isHighCongestionRisk(date, f ?? emptyPreferenceFlags());
+                      const personnelTight = personnelTightByDate[date];
                       const dots = summaryDots(f);
+                      const wd = new Date(`${date}T12:00:00`).getDay();
+                      const isSaturday = wd === 6;
+                      const isSunOrNationalHoliday = isSundayOrNationalHoliday(
+                        date,
+                        holidayLookupMap,
+                      );
+                      const demandInfeasible = demandInfeasibleByDate[date];
                       const congressLabels =
                         selectedMember !== null
                           ? getMemberCongressDutyLabels(
@@ -526,6 +556,13 @@ export default function MemberInputPage() {
                             )
                           : [];
                       const congressDay = congressLabels.length > 0;
+                      const weekendHolidayBg = congressDay
+                        ? ""
+                        : isSunOrNationalHoliday
+                          ? "bg-emerald-50/95 dark:bg-emerald-950/40"
+                          : isSaturday
+                            ? "bg-amber-50/95 dark:bg-amber-950/45"
+                            : "";
                       return (
                         <div
                           key={date}
@@ -533,9 +570,13 @@ export default function MemberInputPage() {
                           className={`flex aspect-square flex-col items-center justify-center rounded-lg border text-xs transition ${
                             congressDay
                               ? "border-neutral-300 bg-neutral-200/75 text-neutral-600 dark:border-neutral-600 dark:bg-neutral-800/80 dark:text-neutral-400"
-                              : congested
-                                ? "border-red-300 bg-red-50/80 dark:border-red-900/60 dark:bg-red-950/30"
-                                : "border-neutral-200 bg-neutral-50 dark:border-neutral-800 dark:bg-neutral-900/60"
+                              : demandInfeasible
+                                ? "border-red-300 bg-red-50/90 text-neutral-900 dark:border-red-900/60 dark:bg-red-950/35 dark:text-neutral-100"
+                                : personnelTight
+                                  ? "border-amber-300 bg-amber-50/85 text-neutral-900 dark:border-amber-800/50 dark:bg-amber-950/35 dark:text-neutral-100"
+                                  : weekendHolidayBg
+                                    ? `border-neutral-200/90 text-neutral-800 dark:border-neutral-600 dark:text-neutral-100 ${weekendHolidayBg}`
+                                    : "border-neutral-200 bg-neutral-50 dark:border-neutral-800 dark:bg-neutral-900/60"
                           }`}
                         >
                           <span className="font-semibold tabular-nums text-neutral-900 dark:text-neutral-100">
@@ -554,6 +595,7 @@ export default function MemberInputPage() {
                         </div>
                       );
                     })}
+                    </div>
                   </div>
                   <p className="mt-2 text-xs text-neutral-500 dark:text-neutral-500">
                     カレンダーは月間の俯瞰用です。チェックの入出力はリスト表示で行ってください。
@@ -563,9 +605,10 @@ export default function MemberInputPage() {
 
               {viewMode === "list" ? (
                 <div className="overflow-x-auto rounded-xl border border-neutral-200 dark:border-neutral-800">
-                  <table className="min-w-[720px] w-full border-collapse text-left text-sm">
-                    <thead>
-                      <tr className="border-b border-neutral-200 bg-neutral-50 dark:border-neutral-800 dark:bg-neutral-900/50">
+                  <div className="max-h-[min(70vh,36rem)] overflow-y-auto overscroll-y-contain">
+                    <table className="min-w-[720px] w-full border-collapse text-left text-sm">
+                      <thead className="sticky top-0 z-10 border-b border-neutral-200 bg-neutral-50 shadow-[0_1px_0_0_rgb(229_229_229)] dark:border-neutral-800 dark:bg-neutral-900/95 dark:shadow-[0_1px_0_0_rgb(38_38_38)]">
+                        <tr>
                         <th className="whitespace-nowrap px-3 py-2 font-medium text-neutral-700 dark:text-neutral-300">
                           日付
                         </th>
@@ -596,7 +639,12 @@ export default function MemberInputPage() {
                       {monthDates.map((date) => {
                         const f = flagsByDate[date] ?? emptyPreferenceFlags();
                         const wd = new Date(date + "T12:00:00").getDay();
-                        const congested = isHighCongestionRisk(date, f);
+                        const isSaturday = wd === 6;
+                        const isSunOrNationalHoliday = isSundayOrNationalHoliday(
+                          date,
+                          holidayLookupMap,
+                        );
+                        const personnelTight = personnelTightByDate[date];
                         const congressLabels = getMemberCongressDutyLabels(
                           adminSnapshot,
                           date,
@@ -604,14 +652,22 @@ export default function MemberInputPage() {
                           holidayLookupMap,
                         );
                         const congressDay = congressLabels.length > 0;
+                        const demandInfeasible = demandInfeasibleByDate[date];
+                        const rowTone = congressDay
+                          ? "border-l-4 border-l-neutral-300 bg-neutral-100/95 dark:border-l-neutral-600 dark:bg-neutral-800/55"
+                          : demandInfeasible
+                            ? "bg-red-50/90 dark:bg-red-950/30"
+                            : personnelTight
+                              ? "bg-amber-50/90 dark:bg-amber-950/30"
+                              : isSunOrNationalHoliday
+                                ? "bg-emerald-50/90 dark:bg-emerald-950/35"
+                                : isSaturday
+                                  ? "bg-amber-50/90 dark:bg-amber-950/40"
+                                  : "odd:bg-white even:bg-neutral-50/80 dark:odd:bg-neutral-950 dark:even:bg-neutral-900/40";
                         return (
                           <tr
                             key={date}
-                            className={`border-b border-neutral-100 dark:border-neutral-800/80 ${
-                              congressDay
-                                ? "border-l-4 border-l-neutral-300 bg-neutral-100/95 dark:border-l-neutral-600 dark:bg-neutral-800/55"
-                                : "odd:bg-white even:bg-neutral-50/80 dark:odd:bg-neutral-950 dark:even:bg-neutral-900/40"
-                            }`}
+                            className={`border-b border-neutral-100 dark:border-neutral-800/80 ${rowTone}`}
                           >
                             <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-neutral-800 dark:text-neutral-200">
                               {date}
@@ -628,7 +684,24 @@ export default function MemberInputPage() {
                                 ["nightUnavailable", f.nightUnavailable],
                               ] as const
                             ).map(([key, checked]) => {
-                              const disabled = isPreferenceToggleDisabled(f, key);
+                              const mergedIfOn = applyExclusiveRules(date, { ...f, [key]: true });
+                              const demandWouldBlock =
+                                !checked &&
+                                selectedMember &&
+                                preferenceOnWouldBreakDailyDemand(
+                                  adminSnapshot,
+                                  holidayLookupMap,
+                                  prefsByMember,
+                                  selectedMember,
+                                  date,
+                                  key,
+                                  mergedIfOn,
+                                ) !== null;
+                              const disabled =
+                                isPreferenceToggleDisabled(f, key) || demandWouldBlock;
+                              const demandTitle = demandWouldBlock
+                                ? DAILY_DEMAND_FEASIBILITY_BLOCK_MESSAGE
+                                : undefined;
                               return (
                               <td key={key} className="px-2 py-2 text-center align-middle">
                                 <input
@@ -642,9 +715,12 @@ export default function MemberInputPage() {
                                   disabled={disabled}
                                   title={
                                     disabled
-                                      ? key === "morningHalfOff"
-                                        ? "午後半休または夜✖が付いているため選べません"
-                                        : "午前半休が付いているため選べません"
+                                      ? demandTitle ??
+                                        (key === "morningHalfOff"
+                                          ? "午後半休または夜✖が付いているため選べません"
+                                          : key === "afternoonHalfOff" || key === "nightUnavailable"
+                                            ? "午前半休が付いているため選べません"
+                                            : undefined)
                                       : undefined
                                   }
                                   onChange={(e) =>
@@ -664,12 +740,19 @@ export default function MemberInputPage() {
                                     {line}
                                   </div>
                                 ))}
-                                {congested ? (
+                                {demandInfeasible ? (
                                   <span className="text-red-700 dark:text-red-400">
-                                    この日は休・✖️希望が集中しやすく、配置が成立しづらい可能性があります。
+                                    {DAILY_DEMAND_FEASIBILITY_BLOCK_MESSAGE}
                                   </span>
                                 ) : null}
-                                {!congressLabels.length && !congested ? (
+                                {personnelTight ? (
+                                  <span className="text-amber-800 dark:text-amber-300">
+                                    {PERSONNEL_TIGHT_MESSAGE}
+                                  </span>
+                                ) : null}
+                                {!congressLabels.length &&
+                                !personnelTight &&
+                                !demandInfeasible ? (
                                   <span className="text-neutral-400">—</span>
                                 ) : null}
                               </div>
@@ -679,6 +762,7 @@ export default function MemberInputPage() {
                       })}
                     </tbody>
                   </table>
+                </div>
                 </div>
               ) : null}
             </Section>

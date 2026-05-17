@@ -31,12 +31,14 @@ import { applyCongressNominationCellLabels } from "./congress-nomination-display
 import { yearMonthFromIso } from "./congress-week";
 import { applyGraphExclusiveIsobeCellLabel } from "./graph-exclusive-display";
 import { formatPreferenceMarksForDay } from "./preference-marks";
+import { appendSupplementalCongressOuenSlots } from "./congress-supplement-slots";
 import {
   applyNewspaperWorkdayAssigneeCell,
   buildDemandSlotsForDate,
   buildEventsColumnText,
   type DemandSlot,
   type DutySlotKind,
+  isBlockedFromWeekdayEarlyLateDueToCongressNomination,
   lookupCongressMonthly,
   lookupCongressWeekly,
 } from "./slots";
@@ -147,20 +149,6 @@ function tryAssignFixedSlot(
 }
 
 const CONGRESS_OUEN_KIND: DutySlotKind = "国会（応援）";
-
-/** 管理者が指名した国会月番・国会週番は、その月／その週ブロックの平日は早番・遅番に入れない（会期外の平日も週番・月番の指名は有効） */
-function isBlockedFromWeekdayEarlyLateDueToCongressNomination(
-  admin: AdminSettings,
-  date: ISODateString,
-  member: DutyMember,
-  hol: Record<ISODateString, string>,
-): boolean {
-  if (!isWeekdayMonFri(date)) return false;
-  if (holidayNameOn(date, hol)) return false;
-  if (lookupCongressMonthly(admin, date) === member) return true;
-  if (lookupCongressWeekly(admin, date) === member) return true;
-  return false;
-}
 
 /**
  * 国会欠員の応援枠: 月番・週番の指名者（無印以外）には割り当てない。
@@ -650,6 +638,19 @@ function buildSortedCandidatePoolForVariableSlot(
   pool = preferNonNightForSundayHolidayReserve(pool, slot.kind, date, prefsMap, hol);
   pool = preferAvoidConsecutiveRestDayAttendance(pool, slot.kind, date, yesterdayKind, hol);
 
+  if (slot.kind === "国会（応援）") {
+    const sortedOuen = [...pool];
+    sortedOuen.sort((a, b) =>
+      compareWithTieBreak(
+        (x, y) => compareForAssignment(x, y, state.auxiliaryDutyCounts),
+        a,
+        b,
+        rankTieRotationAttempt,
+      ),
+    );
+    return sortedOuen;
+  }
+
   const sorted = [...pool];
   sorted.sort((a, b) =>
     compareWithTieBreak(
@@ -913,7 +914,13 @@ function generateRosterOnce(
         monthlyHolidayReserveCounts[m] = 0;
       }
     }
-    const slots = buildDemandSlotsForDate(admin, date, hol);
+    const slots = appendSupplementalCongressOuenSlots(
+      buildDemandSlotsForDate(admin, date, hol),
+      admin,
+      date,
+      hol,
+      prefsMap,
+    );
     const dayInitial = createDaySearchStateFromGlobals(
       emptyCells(),
       auxiliaryDutyCounts,

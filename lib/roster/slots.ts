@@ -30,6 +30,11 @@ export function isCongressSlotKind(kind: DutySlotKind): boolean {
   );
 }
 
+/** 管理者指名の国会枠（応援枠は含まない）。半休があっても指名者に割り当て可能にする判定に使用 */
+export function isAdminNominatedCongressDutyKind(kind: DutySlotKind): boolean {
+  return kind === "国会月番" || kind === "国会週番" || kind === "国会";
+}
+
 function isCongressKind(kind: DutySlotKind): boolean {
   return isCongressSlotKind(kind);
 }
@@ -69,6 +74,20 @@ export function lookupCongressWeekly(
   return admin.congressWeeklyAssignments.find(
     (a) => a.yearMonth === ym && a.weekIndexInMonth === wk,
   )?.dutyMember;
+}
+
+/** 国会月番・週番指名者はその平日（祝除く）は早番・遅番に入れない（会期外でも週番指名は有効） */
+export function isBlockedFromWeekdayEarlyLateDueToCongressNomination(
+  admin: AdminSettings,
+  date: ISODateString,
+  member: DutyMember,
+  hol: Record<ISODateString, string>,
+): boolean {
+  if (!isWeekdayMonFri(date)) return false;
+  if (holidayNameOn(date, hol)) return false;
+  if (lookupCongressMonthly(admin, date) === member) return true;
+  if (lookupCongressWeekly(admin, date) === member) return true;
+  return false;
 }
 
 function findOverride(
@@ -163,8 +182,9 @@ export function buildDemandSlotsForDate(
 
   /** 日曜、または国民の祝日・振替休日等（祝日法による休日）は日曜と同様メイン＋予備。国会枠は付けない。 */
   if (isSunday(date) || isNationalHolidayOrSubstitute) {
-    const mainN = ov?.weekendHolidaySlots?.sundayOrHolidayMain ?? 1;
-    const resN = ov?.weekendHolidaySlots?.sundayOrHolidayReserve ?? 1;
+    /** メイン・予備は各 1 名以上（希望入力の需要判定・生成で 0 上書きを無効化） */
+    const mainN = Math.max(1, ov?.weekendHolidaySlots?.sundayOrHolidayMain ?? 1);
+    const resN = Math.max(1, ov?.weekendHolidaySlots?.sundayOrHolidayReserve ?? 1);
 
     for (let i = 0; i < mainN; i++) {
       slots.push({ id: `main-${i}`, kind: "メイン" });
@@ -211,7 +231,8 @@ export function buildDemandSlotsForDate(
   }
 
   if (isSaturday(date)) {
-    const sat = ov?.weekendHolidaySlots?.saturdayTotal ?? 1;
+    /** 土曜メインは 1 名以上（0 上書きを無効化） */
+    const sat = Math.max(1, ov?.weekendHolidaySlots?.saturdayTotal ?? 1);
     for (let i = 0; i < sat; i++) {
       slots.push({ id: `sat-${i}`, kind: "メイン" });
     }
